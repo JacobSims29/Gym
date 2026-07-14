@@ -13,7 +13,7 @@
   :root{
     --bg:#0a0a0a; --card:#171717; --line:#262626; --line2:#404040;
     --text:#f5f5f5; --dim:#a3a3a3; --dimmer:#525252;
-    --accent:#fbbf24; --good:#34d399; --bad:#f87171;
+    --accent:#fbbf24; --good:#34d399; --bad:#f87171; --cardio:#60a5fa;
   }
   body{
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -32,7 +32,7 @@
   .row{display:flex;align-items:center;gap:8px}
   .grow{flex:1}
 
-  input,select{
+  input{
     background:var(--bg);border:1px solid var(--line2);border-radius:6px;
     color:var(--text);padding:12px;font-size:16px;font-family:inherit;width:100%;
   }
@@ -45,12 +45,12 @@
   .primary{background:var(--accent);color:#0a0a0a}
   .ghost{background:#262626;color:var(--text)}
   .saved{background:#059669;color:#fff}
-  .icon{width:auto;padding:8px;background:none;color:var(--dimmer);font-size:18px}
-  .icon:hover{color:var(--bad)}
+  .icon{width:auto;padding:8px;background:none;color:var(--dimmer);font-size:16px}
 
-  .seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-  .seg button{border:1px solid var(--line);background:var(--card);color:var(--dimmer)}
+  .seg{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px}
+  .seg button{border:1px solid var(--line);background:var(--card);color:var(--dimmer);padding:12px 4px;font-size:14px}
   .seg button.on{border-color:var(--accent);background:#262626;color:var(--text)}
+  .seg button.on.cardio{border-color:var(--cardio)}
 
   .nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
     display:grid;grid-template-columns:repeat(5,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
@@ -63,13 +63,31 @@
   .last{font-size:11px;color:var(--dimmer);font-family:ui-monospace,Menlo,monospace}
   .up{color:var(--good)}
 
-  .hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-  .hdr .mid{text-align:center}
+  .hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .hdr .mid{text-align:center;cursor:pointer}
   .arrow{background:none;color:var(--dimmer);font-size:22px;width:44px;padding:8px}
+  .caret{font-size:11px;color:var(--dimmer);margin-top:2px}
+
+  /* calendar */
+  .cal{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+  .calhdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .calhdr span{font-size:14px;font-weight:600}
+  .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+  .cd{aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    border-radius:6px;font-size:13px;color:var(--dim);background:none;padding:0;font-weight:500}
+  .cd.dow{color:var(--dimmer);font-size:10px;font-weight:600;text-transform:uppercase;aspect-ratio:auto;padding:4px 0}
+  .cd.blank{visibility:hidden}
+  .cd.today{border:1px solid var(--line2)}
+  .cd.sel{background:var(--accent);color:#0a0a0a;font-weight:700}
+  .dots{display:flex;gap:2px;height:4px;margin-top:2px}
+  .dot{width:4px;height:4px;border-radius:50%;background:var(--accent)}
+  .dot.c{background:var(--cardio)}
+  .cd.sel .dot{background:#0a0a0a}
 
   .list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 4px;
     border-bottom:1px solid var(--line)}
   .list-row:last-child{border-bottom:none}
+  .tap{flex:1;text-align:left;background:none;padding:0;font-weight:400;font-size:14px;color:var(--dim)}
 
   .empty{border:1px dashed var(--line2);border-radius:10px;padding:32px 16px;text-align:center;color:var(--dimmer);font-size:14px}
   .warn{background:#422006;border:1px solid #78350f;color:#fcd34d;padding:12px;border-radius:8px;font-size:13px;margin-bottom:12px}
@@ -80,11 +98,13 @@
   .photo{position:relative;aspect-ratio:1;background:var(--card);border:1px solid var(--line);
     border-radius:8px;overflow:hidden}
   .photo img{width:100%;height:100%;object-fit:cover;display:block}
+  .photo.picked{border:2px solid var(--accent)}
   .photo .del{position:absolute;top:6px;right:6px;background:rgba(10,10,10,.8);color:var(--dim);
     width:auto;padding:4px 8px;border-radius:6px;font-size:14px}
+  .photo .badge{position:absolute;top:6px;left:6px;background:var(--accent);color:#0a0a0a;
+    width:22px;height:22px;border-radius:50%;font-size:12px;padding:0;display:flex;align-items:center;justify-content:center}
   .cap{display:flex;justify-content:space-between;font-size:11px;color:var(--dimmer);margin-top:4px}
 
-  /* rest timer */
   .fab{position:fixed;right:16px;bottom:calc(76px + env(safe-area-inset-bottom));width:56px;height:56px;
     border-radius:50%;background:#262626;border:1px solid var(--line2);color:var(--accent);
     font-size:22px;padding:0;z-index:31;box-shadow:0 4px 16px rgba(0,0,0,.5)}
@@ -131,15 +151,16 @@
 <script>
 /* ============ constants ============ */
 const KEY = "gymlog.v1";
-const START = "2026-07-06";           // Week 1 Monday
+const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-const EMPTY = { plans:{A:[],B:[]}, sessions:[], weights:[], photos:[], lastBackup:null };
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const SCHEMA = 2;   // bump whenever the saved data shape changes, and add a migration below
+const EMPTY = { schema:SCHEMA, plans:{A:[],B:[]}, sessions:[], weights:[], photos:[], lastBackup:null };
 
 let D = structuredClone(EMPTY);
-let tab = "train";
-let err = "";
+let tab = "train", err = "", note = "";
 
-/* ============ dates (local, never UTC) ============ */
+/* ============ dates ============ */
 const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 const today = () => iso(new Date());
 const pd = s => { const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); };
@@ -149,16 +170,55 @@ const shortD = s => pd(s).toLocaleDateString("en-US",{month:"short",day:"numeric
 const ago = s => Math.floor((pd(today())-pd(s))/864e5);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
-/* ============ storage: core in localStorage, photos in IndexedDB ============ */
+/* ============ migrations ============
+   Each entry upgrades data from version N to N+1. They run in order, so a v1
+   backup opened by a v5 app walks 1→2→3→4→5. Never edit an old migration once
+   it has shipped; add a new one and bump SCHEMA.                              */
+const MIGRATIONS = {
+  // 1 → 2: one plan became two (A/B); sessions gained a workout tag; cardio arrived
+  1(d){
+    if(d.plan && !d.plans){ d.plans = { A:d.plan, B:[] }; delete d.plan; }
+    if(!d.plans) d.plans = { A:[], B:[] };
+    d.plans.A = d.plans.A || [];
+    d.plans.B = d.plans.B || [];
+    (d.sessions || []).forEach(s => { if(!s.workout) s.workout = "A"; });
+    return d;
+  }
+};
+
+class NewerData extends Error {}
+
+function migrate(raw){
+  let v = Number(raw && raw.schema) || 1;
+  if(v > SCHEMA) throw new NewerData(String(v));
+  let d = Object.assign(structuredClone(EMPTY), raw || {});
+  while(v < SCHEMA){
+    const step = MIGRATIONS[v];
+    if(!step) throw new Error("No migration from v" + v);
+    d = step(d);
+    v++;
+  }
+  d.schema = SCHEMA;
+  return d;
+}
+
+/* ============ storage ============ */
 function save(){
-  try { localStorage.setItem(KEY, JSON.stringify(D)); err=""; }
+  try{ D.schema = SCHEMA; localStorage.setItem(KEY, JSON.stringify(D)); err=""; }
   catch(e){ err="Storage is full. Export a backup, then delete some photos."; }
 }
 function load(){
-  try { const raw = localStorage.getItem(KEY); if(raw) D = Object.assign(structuredClone(EMPTY), JSON.parse(raw)); }
-  catch(e){ err="Saved data looks damaged. Restore from a backup file."; }
+  try{
+    const raw = localStorage.getItem(KEY);
+    if(!raw) return;
+    D = migrate(JSON.parse(raw));
+    save();                       // write the upgraded shape back
+  }catch(e){
+    err = e instanceof NewerData
+      ? `This data was written by a newer version of the app (v${e.message}). Update the app before using it — nothing has been overwritten.`
+      : "Saved data looks damaged. Restore from a backup file.";
+  }
 }
-
 const IDB = {
   db:null,
   open(){
@@ -170,13 +230,12 @@ const IDB = {
       r.onerror = () => rej(r.error);
     });
   },
-  async tx(mode){ const db = await this.open(); return db.transaction("photos",mode).objectStore("photos"); },
+  async tx(m){ const db = await this.open(); return db.transaction("photos",m).objectStore("photos"); },
   async put(k,v){ const s=await this.tx("readwrite"); return new Promise((res,rej)=>{ const q=s.put(v,k); q.onsuccess=res; q.onerror=()=>rej(q.error); }); },
   async get(k){ const s=await this.tx("readonly"); return new Promise((res,rej)=>{ const q=s.get(k); q.onsuccess=()=>res(q.result); q.onerror=()=>rej(q.error); }); },
   async del(k){ const s=await this.tx("readwrite"); return new Promise((res,rej)=>{ const q=s.delete(k); q.onsuccess=res; q.onerror=()=>rej(q.error); }); }
 };
 
-/* ============ image compression ============ */
 function compress(file){
   return new Promise((res,rej)=>{
     const fr = new FileReader();
@@ -199,13 +258,12 @@ function compress(file){
 
 /* ============ rest timer ============ */
 const TIMER = {
-  dur:90, left:90, running:false, tick:null, ctx:null,
+  dur:90,left:90,running:false,tick:null,ctx:null,
   open(){ document.getElementById("timer").classList.remove("hide"); document.getElementById("fab").classList.add("hide"); this.draw(); },
   close(){ document.getElementById("timer").classList.add("hide"); document.getElementById("fab").classList.remove("hide"); },
   pick(s){ this.dur=s; this.left=s; this.stop(); this.draw(); },
   toggle(){ this.running ? this.stop() : this.start(); },
   start(){
-    // AudioContext must be created inside a tap or iOS keeps it muted
     if(!this.ctx){ const AC = window.AudioContext || window.webkitAudioContext; if(AC) this.ctx = new AC(); }
     if(this.ctx && this.ctx.state === "suspended") this.ctx.resume();
     if(this.left === 0) this.left = this.dur;
@@ -230,7 +288,7 @@ const TIMER = {
         o.start(); o.stop(this.ctx.currentTime+.7);
       }
       if(navigator.vibrate) navigator.vibrate([200,100,200]);
-    }catch(e){ /* silent is fine, the clock still turns green */ }
+    }catch(e){}
   },
   draw(){
     const c = document.getElementById("clock");
@@ -243,59 +301,137 @@ const TIMER = {
   }
 };
 
-/* ============ views ============ */
+/* ============ train state ============ */
 let trainDate = today();
-let trainWorkout = "A";
+let trainWorkout = "A";          // "A" | "B" | "C" (cardio)
 let planWhich = "A";
-let draft = {};      // exercise id -> {weight,sets,reps}
+let draft = {};
+let cardioDraft = { minutes:"", miles:"" };
 let justSaved = false;
-let note = "";
+let calOpen = false;
+let calMonth = new Date();       // any date inside the shown month
+
+const isCardio = w => w === "C";
+const wLabel = w => w==="C" ? "Cardio" : "Workout "+w;
+
+function sessionOn(date, w){ return D.sessions.find(s=>s.date===date && s.workout===w); }
 
 function lastLift(name){
   let found = null;
   [...D.sessions].sort((a,b)=>a.date.localeCompare(b.date))
-    .forEach(s => s.exercises.forEach(e => { if(e.name===name) found = e; }));
+    .forEach(s => (s.exercises||[]).forEach(e => { if(e.name===name) found = e; }));
   return found;
+}
+function lastCardio(){
+  const c = [...D.sessions].filter(s=>s.workout==="C").sort((a,b)=>a.date.localeCompare(b.date));
+  return c.length ? c[c.length-1] : null;
+}
+function cardioText(s){
+  const p = [];
+  if(s.cardio && s.cardio.minutes) p.push(s.cardio.minutes+" min");
+  if(s.cardio && s.cardio.miles) p.push(s.cardio.miles+" mi");
+  return p.join(" · ") || "logged";
 }
 
 function seedDraft(){
-  const plan = D.plans[trainWorkout] || [];
-  const existing = D.sessions.find(s=>s.date===trainDate && s.workout===trainWorkout);
-  draft = {};
-  plan.forEach(ex=>{
-    const done = existing && existing.exercises.find(e=>e.name===ex.name);
-    draft[ex.id] = {
-      weight: done ? done.weight : "",
-      sets:   done ? done.sets : ex.sets,
-      reps:   done ? done.reps : ex.reps
+  const ex = sessionOn(trainDate, trainWorkout);
+  if(isCardio(trainWorkout)){
+    cardioDraft = {
+      minutes: ex && ex.cardio ? (ex.cardio.minutes||"") : "",
+      miles:   ex && ex.cardio ? (ex.cardio.miles||"")   : ""
     };
-  });
+  } else {
+    const plan = D.plans[trainWorkout] || [];
+    draft = {};
+    plan.forEach(x=>{
+      const done = ex && (ex.exercises||[]).find(e=>e.name===x.name);
+      draft[x.id] = {
+        weight: done ? done.weight : "",
+        sets:   done ? done.sets : x.sets,
+        reps:   done ? done.reps : x.reps
+      };
+    });
+  }
   justSaved = false;
 }
 
+/* ============ calendar ============ */
+function calendarHTML(){
+  const first = new Date(calMonth.getFullYear(), calMonth.getMonth(), 1);
+  const days = new Date(calMonth.getFullYear(), calMonth.getMonth()+1, 0).getDate();
+  let cells = "";
+  DAYS.forEach(d => cells += `<div class="cd dow">${d[0]}</div>`);
+  for(let i=0;i<first.getDay();i++) cells += `<div class="cd blank"></div>`;
+  for(let d=1; d<=days; d++){
+    const ds = iso(new Date(calMonth.getFullYear(), calMonth.getMonth(), d));
+    const marks = D.sessions.filter(s=>s.date===ds);
+    const dots = marks.map(s=>`<span class="dot ${s.workout==="C"?"c":""}"></span>`).join("");
+    const cls = ["cd", ds===trainDate?"sel":"", ds===today()?"today":""].filter(Boolean).join(" ");
+    cells += `<button class="${cls}" onclick="pickDate('${ds}')">${d}<span class="dots">${dots}</span></button>`;
+  }
+  return `<div class="cal">
+    <div class="calhdr">
+      <button class="arrow" onclick="shiftMonth(-1)">‹</button>
+      <span>${MONTHS[calMonth.getMonth()]} ${calMonth.getFullYear()}</span>
+      <button class="arrow" onclick="shiftMonth(1)">›</button>
+    </div>
+    <div class="calgrid">${cells}</div>
+    <button class="ghost" style="margin-top:10px;padding:10px;font-size:13px" onclick="pickDate('${today()}')">Jump to today</button>
+  </div>`;
+}
+function shiftMonth(n){ calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth()+n, 1); render(); }
+function pickDate(ds){ trainDate = ds; calMonth = pd(ds); calOpen = false; seedDraft(); render(); }
+function toggleCal(){ calOpen = !calOpen; if(calOpen) calMonth = pd(trainDate); render(); }
+
+/* ============ train view ============ */
 function viewTrain(){
-  const plan = D.plans[trainWorkout] || [];
-  const existing = D.sessions.find(s=>s.date===trainDate && s.workout===trainWorkout);
+  const existing = sessionOn(trainDate, trainWorkout);
 
   let h = `
   <div class="hdr">
     <button class="arrow" onclick="shiftDay(-1)">‹</button>
-    <div class="mid">
+    <div class="mid" onclick="toggleCal()">
       <div class="eyebrow">Week ${wk(trainDate)} · ${dow(trainDate)}</div>
       <h2>${shortD(trainDate)}</h2>
+      <div class="caret">${calOpen ? "▲ close calendar" : "▼ pick a date"}</div>
     </div>
     <button class="arrow" onclick="shiftDay(1)">›</button>
-  </div>
-  <div class="seg">
-    ${["A","B"].map(w=>{
-      const done = D.sessions.some(s=>s.date===trainDate && s.workout===w);
-      return `<button class="${trainWorkout===w?"on":""}" onclick="pickWorkout('${w}')">Workout ${w}${done?' <span class="up">✓</span>':""}</button>`;
+  </div>`;
+
+  if(calOpen) h += calendarHTML();
+
+  h += `<div class="seg">
+    ${["A","B","C"].map(w=>{
+      const done = sessionOn(trainDate,w);
+      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"cardio":""}" onclick="pickWorkout('${w}')">${wLabel(w)}${done?' <span class="up">✓</span>':""}</button>`;
     }).join("")}
   </div>`;
 
+  if(isCardio(trainWorkout)){
+    const prev = lastCardio();
+    h += `
+    <div class="card">
+      <div class="lift">
+        <h3>Walk / Run</h3>
+        <span class="last">${prev ? `last: ${cardioText(prev)} (${shortD(prev.date)})` : "first time"}</span>
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <input class="num grow" type="number" inputmode="decimal" placeholder="minutes"
+          value="${esc(cardioDraft.minutes)}" oninput="setCardio('minutes',this.value)">
+        <input class="num grow" type="number" inputmode="decimal" step="0.01" placeholder="miles"
+          value="${esc(cardioDraft.miles)}" oninput="setCardio('miles',this.value)">
+      </div>
+      <p class="sub">Fill in either one, or both.</p>
+    </div>
+    <button class="${justSaved?"saved":"primary"}" onclick="saveCardio()">
+      ${justSaved ? "✓ Saved" : existing ? "Update cardio" : "Save cardio"}
+    </button>`;
+    return h + historyHTML();
+  }
+
+  const plan = D.plans[trainWorkout] || [];
   if(!plan.length){
-    h += `<div class="empty">Workout ${trainWorkout} has no lifts yet.<br>Add them on the Plan tab.</div>`;
-    return h;
+    return h + `<div class="empty">Workout ${trainWorkout} has no lifts yet.<br>Add them on the Plan tab.</div>` + historyHTML();
   }
 
   plan.forEach(ex=>{
@@ -322,31 +458,35 @@ function viewTrain(){
     ${justSaved ? "✓ Saved" : existing ? `Update workout ${trainWorkout}` : `Save workout ${trainWorkout}`}
   </button>`;
 
-  if(D.sessions.length){
-    h += `<div style="margin-top:24px"><div class="eyebrow" style="color:var(--dimmer)">History</div><div class="card" style="margin-top:8px">`;
-    D.sessions.slice(0,8).forEach(s=>{
-      h += `<div class="list-row" onclick="jumpTo('${s.date}','${s.workout}')" style="cursor:pointer">
-        <span style="font-size:14px;color:var(--dim)">${dow(s.date)} ${shortD(s.date)} <span class="mono" style="color:var(--dimmer)">${s.workout}</span></span>
-        <span class="mono" style="font-size:12px;color:var(--dimmer)">${s.exercises.length} lifts</span>
-      </div>`;
-    });
-    h += `</div></div>`;
-  }
-  return h;
+  return h + historyHTML();
 }
 
+function historyHTML(){
+  if(!D.sessions.length) return "";
+  let h = `<div style="margin-top:24px"><div class="eyebrow" style="color:var(--dimmer)">History</div><div class="card" style="margin-top:8px">`;
+  D.sessions.slice(0,12).forEach(s=>{
+    const detail = s.workout==="C" ? cardioText(s) : `${(s.exercises||[]).length} lifts`;
+    h += `<div class="list-row">
+      <button class="tap" onclick="jumpTo('${s.date}','${s.workout}')">
+        ${dow(s.date)} ${shortD(s.date)} <span class="mono" style="color:var(--dimmer)">${s.workout==="C"?"cardio":s.workout}</span>
+      </button>
+      <span class="mono" style="font-size:12px;color:var(--dimmer);margin-right:4px">${esc(detail)}</span>
+      <button class="icon" onclick="delSession('${s.date}','${s.workout}')">🗑</button>
+    </div>`;
+  });
+  return h + `</div></div>`;
+}
+
+/* ============ plan view ============ */
 function viewPlan(){
   const list = D.plans[planWhich] || [];
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
-  let h = `
-  <div class="eyebrow">The plan</div>
-  <h2>Full body · M/W/F</h2>
-  <p class="sub">Sets and reps live here. Weight gets logged per session.</p>
-  <div style="height:16px"></div>`;
-
+  let h = `<div class="eyebrow">The plan</div><h2>Full body · M/W/F</h2>
+    <p class="sub">Sets and reps live here. Weight gets logged per session. Cardio needs no plan — just log it.</p>
+    <div style="height:16px"></div>`;
   if(stale) h += `<div class="warn">${D.lastBackup ? `Last backup: ${ago(D.lastBackup)} days ago.` : "No backup yet."} Export one from the Backup tab.</div>`;
 
-  h += `<div class="seg">${["A","B"].map(w=>
+  h += `<div class="seg" style="grid-template-columns:1fr 1fr">${["A","B"].map(w=>
     `<button class="${planWhich===w?"on":""}" onclick="pickPlan('${w}')">Workout ${w} <span class="mono" style="color:var(--dimmer)">${(D.plans[w]||[]).length}</span></button>`
   ).join("")}</div>`;
 
@@ -366,8 +506,7 @@ function viewPlan(){
     h += `<div class="empty">Workout ${planWhich} is empty.</div><div style="height:12px"></div>`;
   }
 
-  h += `
-  <div class="card">
+  h += `<div class="card">
     <input type="text" id="newName" placeholder="Add a lift to workout ${planWhich}">
     <div class="row" style="margin:12px 0">
       <input class="num" style="width:64px" type="number" inputmode="numeric" id="newSets" value="3">
@@ -380,19 +519,19 @@ function viewPlan(){
   return h;
 }
 
+/* ============ weight view ============ */
 function chartSVG(){
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
   if(asc.length < 2) return `<p class="sub" style="text-align:center;padding:24px 0">Log two weigh-ins and the graph appears.</p>`;
   const vals = asc.map(w=>w.value);
-  const min = Math.min(...vals) - 1, max = Math.max(...vals) + 1;
-  const W=440, H=160, L=34, R=8, T=10, B=22;
+  const min = Math.min(...vals)-1, max = Math.max(...vals)+1;
+  const W=440,H=160,L=34,R=8,T=10,B=22;
   const x = i => L + (i/(asc.length-1))*(W-L-R);
   const y = v => T + (1-(v-min)/(max-min))*(H-T-B);
   const pts = asc.map((w,i)=>`${x(i).toFixed(1)},${y(w.value).toFixed(1)}`).join(" ");
-  const grid = [max, (max+min)/2, min].map(v=>
+  const grid = [max,(max+min)/2,min].map(v=>
     `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-R}" y2="${y(v).toFixed(1)}" stroke="#262626"/>
-     <text x="0" y="${(y(v)+4).toFixed(1)}" fill="#525252" font-size="10" font-family="monospace">${v.toFixed(1)}</text>`
-  ).join("");
+     <text x="0" y="${(y(v)+4).toFixed(1)}" fill="#525252" font-size="10" font-family="monospace">${v.toFixed(1)}</text>`).join("");
   const dots = asc.map((w,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2.5" fill="#fbbf24"/>`).join("");
   return `<div class="card"><svg viewBox="0 0 ${W} ${H}" width="100%" height="170">
     ${grid}
@@ -402,19 +541,14 @@ function chartSVG(){
     <text x="${W-R}" y="${H-4}" fill="#525252" font-size="10" text-anchor="end">${shortD(asc[asc.length-1].date)}</text>
   </svg></div>`;
 }
-
 function viewWeight(){
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
   const cur = asc.length ? asc[asc.length-1].value : null;
   const delta = asc.length > 1 ? (asc[asc.length-1].value - asc[0].value) : null;
-
   let h = `
   <div class="row" style="align-items:flex-end;justify-content:space-between;margin-bottom:16px">
-    <div>
-      <div class="eyebrow">Bodyweight</div>
-      <h2 class="mono">${cur !== null ? cur+" lb" : "—"}</h2>
-    </div>
-    ${delta !== null ? `<span class="mono" style="font-size:13px;color:${delta<0?"var(--good)":"var(--dim)"}">${delta>0?"+":""}${delta.toFixed(1)} lb since start</span>` : ""}
+    <div><div class="eyebrow">Bodyweight</div><h2 class="mono">${cur!==null ? cur+" lb" : "—"}</h2></div>
+    ${delta!==null ? `<span class="mono" style="font-size:13px;color:${delta<0?"var(--good)":"var(--dim)"}">${delta>0?"+":""}${delta.toFixed(1)} lb since start</span>` : ""}
   </div>
   ${chartSVG()}
   <div class="card">
@@ -424,7 +558,6 @@ function viewWeight(){
     </div>
     <button class="primary" onclick="addWeight()">Log weight</button>
   </div>`;
-
   if(D.weights.length){
     h += `<div class="card">`;
     D.weights.forEach(w=>{
@@ -438,41 +571,59 @@ function viewWeight(){
   return h;
 }
 
+/* ============ photos view ============ */
+let compare = [];   // up to 2 photo ids
+
 function viewPhotos(){
-  let h = `
-  <div class="eyebrow">Progress</div>
-  <h2>Photos</h2>
-  <div style="height:16px"></div>
-  <div class="card">
+  let h = `<div class="eyebrow">Progress</div><h2>Photos</h2><div style="height:16px"></div>`;
+
+  if(compare.length === 2){
+    const [a,b] = compare.map(id => D.photos.find(p=>p.id===id));
+    h += `<div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px">
+        <span class="eyebrow" style="color:var(--dimmer)">Side by side</span>
+        <button class="icon" onclick="clearCompare()">✕</button>
+      </div>
+      <div class="grid2">
+        ${[a,b].map(p=>`<div>
+          <div class="photo"><img id="cmp-${p.id}" alt="Progress photo, ${shortD(p.date)}"></div>
+          <div class="cap"><span>${shortD(p.date)}</span><span class="mono">wk ${wk(p.date)}</span></div>
+        </div>`).join("")}
+      </div>
+      <p class="sub" style="text-align:center">${Math.abs(ago(a.date)-ago(b.date))} days apart</p>
+    </div>`;
+  } else if(compare.length === 1){
+    h += `<div class="warn">Pick one more photo to compare.<button class="icon" style="float:right;color:inherit" onclick="clearCompare()">cancel</button></div>`;
+  }
+
+  h += `<div class="card">
     <input type="date" id="pDate" value="${today()}" style="margin-bottom:12px">
     <input type="file" accept="image/*" id="pFile" class="hide" onchange="addPhoto(event)">
     <button class="ghost" onclick="document.getElementById('pFile').click()">📷 Add photo</button>
   </div>`;
 
-  if(!D.photos.length){
-    h += `<div class="empty">No photos yet.<br>Same light, same angle, same time of day works best.</div>`;
-    return h;
-  }
-  h += `<div class="grid2">`;
+  if(!D.photos.length) return h + `<div class="empty">No photos yet.<br>Same light, same angle, same time of day works best.</div>`;
+
+  h += `<p class="sub" style="margin-bottom:8px">Tap any two photos to compare them.</p><div class="grid2">`;
   D.photos.forEach(p=>{
+    const idx = compare.indexOf(p.id);
     h += `<div>
-      <div class="photo">
+      <div class="photo ${idx>=0?"picked":""}" onclick="toggleCompare('${p.id}')">
         <img id="img-${p.id}" alt="Progress photo, ${shortD(p.date)}">
-        <button class="del" onclick="delPhoto('${p.id}')">🗑</button>
+        ${idx>=0 ? `<span class="badge">${idx+1}</span>` : ""}
+        <button class="del" onclick="event.stopPropagation();delPhoto('${p.id}')">🗑</button>
       </div>
       <div class="cap"><span>${shortD(p.date)}</span><span class="mono">wk ${wk(p.date)}</span></div>
     </div>`;
   });
-  h += `</div>`;
-  return h;
+  return h + `</div>`;
 }
 
+/* ============ backup view ============ */
 function viewBackup(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   return `
-  <div class="eyebrow">Your data</div>
-  <h2>Backup</h2>
-  <div style="height:16px"></div>
+  <div class="eyebrow">Your data</div><h2>Backup</h2><div style="height:16px"></div>
   <div class="card stats">
     <div><div class="n">${D.sessions.length}</div><div class="l">sessions</div></div>
     <div><div class="n">${D.weights.length}</div><div class="l">weigh-ins</div></div>
@@ -488,25 +639,42 @@ function viewBackup(){
   <p class="sub" style="margin-top:16px;line-height:1.5">
     Export writes one JSON file holding both plans, every session, every weigh-in, and every photo.
     In the share sheet choose Save to Files → iCloud Drive. Restoring replaces everything currently in the app.
-  </p>`;
+  </p>
+  <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>`;
 }
 
 /* ============ actions ============ */
-function shiftDay(n){ const d = pd(trainDate); d.setDate(d.getDate()+n); trainDate = iso(d); seedDraft(); render(); }
+function shiftDay(n){ const d = pd(trainDate); d.setDate(d.getDate()+n); trainDate = iso(d); calMonth = pd(trainDate); seedDraft(); render(); }
 function pickWorkout(w){ trainWorkout = w; seedDraft(); render(); }
-function jumpTo(date,w){ trainDate=date; trainWorkout=w; seedDraft(); render(); }
+function jumpTo(date,w){ trainDate=date; trainWorkout=w; calMonth=pd(date); calOpen=false; seedDraft(); render(); }
 function setDraft(id,f,v){ if(!draft[id]) draft[id]={}; draft[id][f]=v; justSaved=false; }
+function setCardio(f,v){ cardioDraft[f]=v; justSaved=false; }
 
 function saveSession(){
   const plan = D.plans[trainWorkout] || [];
   const exercises = plan
     .filter(ex => draft[ex.id] && draft[ex.id].weight !== "")
     .map(ex => ({ name:ex.name, weight:draft[ex.id].weight, sets:draft[ex.id].sets, reps:draft[ex.id].reps }));
-  if(!exercises.length){ err = "Enter at least one weight before saving."; render(); return; }
+  if(!exercises.length){ err="Enter at least one weight before saving."; render(); return; }
   D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout===trainWorkout)),
                 { date:trainDate, workout:trainWorkout, exercises }]
                 .sort((a,b)=>b.date.localeCompare(a.date));
-  save(); justSaved = true; render();
+  save(); justSaved=true; render();
+}
+
+function saveCardio(){
+  const m = cardioDraft.minutes, mi = cardioDraft.miles;
+  if(!m && !mi){ err="Enter minutes or miles — either one is enough."; render(); return; }
+  D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout==="C")),
+                { date:trainDate, workout:"C", cardio:{ minutes:m, miles:mi } }]
+                .sort((a,b)=>b.date.localeCompare(a.date));
+  save(); justSaved=true; render();
+}
+
+function delSession(date,w){
+  if(!confirm(`Delete ${w==="C"?"cardio":"workout "+w} on ${shortD(date)}?`)) return;
+  D.sessions = D.sessions.filter(s => !(s.date===date && s.workout===w));
+  save(); seedDraft(); render();
 }
 
 function pickPlan(w){ planWhich = w; render(); }
@@ -531,7 +699,7 @@ function addWeight(){
   const date = document.getElementById("wDate").value;
   const val = parseFloat(document.getElementById("wVal").value);
   if(!date || isNaN(val)) return;
-  D.weights = [...D.weights.filter(w=>w.date!==date), {date, value:val}].sort((a,b)=>b.date.localeCompare(a.date));
+  D.weights = [...D.weights.filter(w=>w.date!==date), {date,value:val}].sort((a,b)=>b.date.localeCompare(a.date));
   save(); render();
 }
 function delWeight(date){ D.weights = D.weights.filter(w=>w.date!==date); save(); render(); }
@@ -543,22 +711,34 @@ async function addPhoto(e){
   try{
     const url = await compress(file);
     const id = String(Date.now());
-    await IDB.put(id, url);
+    await IDB.put(id,url);
     D.photos = [{id,date}, ...D.photos].sort((a,b)=>b.date.localeCompare(a.date));
     save(); render();
   }catch(ex){ err = ex.message || "That photo didn't save."; render(); }
   e.target.value = "";
 }
 async function delPhoto(id){
+  if(!confirm("Delete this photo?")) return;
   D.photos = D.photos.filter(p=>p.id!==id);
+  compare = compare.filter(c=>c!==id);
   save(); render();
   try{ await IDB.del(id); }catch(e){}
 }
+function toggleCompare(id){
+  const i = compare.indexOf(id);
+  if(i >= 0) compare.splice(i,1);
+  else if(compare.length < 2) compare.push(id);
+  else compare = [compare[1], id];
+  render();
+}
+function clearCompare(){ compare = []; render(); }
+
 async function paintPhotos(){
-  for(const p of D.photos){
-    const el = document.getElementById("img-"+p.id);
+  const targets = [...D.photos.map(p=>["img-"+p.id, p.id]), ...compare.map(id=>["cmp-"+id, id])];
+  for(const [elId, pid] of targets){
+    const el = document.getElementById(elId);
     if(!el || el.src) continue;
-    try{ const url = await IDB.get(p.id); if(url) el.src = url; }catch(e){}
+    try{ const url = await IDB.get(pid); if(url) el.src = url; }catch(e){}
   }
 }
 
@@ -567,31 +747,39 @@ async function exportAll(){
   try{
     const photos = {};
     for(const p of D.photos){ const u = await IDB.get(p.id); if(u) photos[p.id] = u; }
-    const blob = new Blob([JSON.stringify({app:"gymlog", version:1, exported:today(), data:D, photos})],
-      {type:"application/json"});
+    const blob = new Blob([JSON.stringify({app:"gymlog",version:SCHEMA,exported:today(),data:D,photos})],{type:"application/json"});
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `gym-backup-${today()}.json`;
     a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    setTimeout(()=>URL.revokeObjectURL(a.href),2000);
     D.lastBackup = today(); save();
     note = "Exported. In the share sheet choose Save to Files → iCloud Drive.";
   }catch(e){ err = "Export failed. Try again."; }
   render();
 }
-
 async function importAll(e){
   const file = e.target.files[0];
   if(!file) return;
   note = "";
   try{
     const parsed = JSON.parse(await file.text());
-    if(!parsed.data || !parsed.data.plans) throw new Error("bad file");
+    if(!parsed || !parsed.data) throw new Error("bad file");
+
+    const v = Number(parsed.version) || Number(parsed.data.schema) || 1;
+    if(v > SCHEMA){
+      err = `That backup was written by a newer version of the app (v${v}). Update the app first — the file is fine, and nothing has been changed.`;
+      e.target.value = ""; render(); return;
+    }
+
+    const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
     for(const [id,url] of Object.entries(parsed.photos || {})) await IDB.put(id,url);
-    D = Object.assign(structuredClone(EMPTY), parsed.data);
+    D = upgraded;
     save(); seedDraft();
-    note = "Restored from backup.";
-  }catch(ex){ err = "That file isn't a gym backup, or it's damaged."; }
+    note = v < SCHEMA
+      ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.`
+      : "Restored from backup.";
+  }catch(ex){ err = "That file isn't a gym backup, or it's damaged. Nothing was changed."; }
   e.target.value = "";
   render();
 }
