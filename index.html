@@ -154,8 +154,8 @@ const KEY = "gymlog.v1";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 2;   // bump whenever the saved data shape changes, and add a migration below
-const EMPTY = { schema:SCHEMA, plans:{A:[],B:[]}, sessions:[], weights:[], photos:[], lastBackup:null };
+const SCHEMA = 4;   // bump whenever the saved data shape changes, and add a migration below
+const EMPTY = { schema:SCHEMA, templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}], sessions:[], weights:[], photos:[], lastBackup:null };
 
 let D = structuredClone(EMPTY);
 let tab = "train", err = "", note = "";
@@ -182,6 +182,31 @@ const MIGRATIONS = {
     d.plans.A = d.plans.A || [];
     d.plans.B = d.plans.B || [];
     (d.sessions || []).forEach(s => { if(!s.workout) s.workout = "A"; });
+    return d;
+  },
+  // 2 → 3: workout names became editable
+  2(d){
+    if(!d.names) d.names = { A:"Workout A", B:"Workout B" };
+    return d;
+  },
+  // 3 → 4: fixed A/B plans became an open list of templates
+  3(d){
+    if(d.plans){                       // genuine pre-v4 data: rebuild from the old shape
+      const names = d.names || {};
+      const plans = d.plans;
+      d.templates = ["A","B"].map(k => ({
+        id: k,
+        name: names[k] || ("Workout " + k),
+        exercises: plans[k] || []
+      }));
+    } else if(!d.templates){           // safety net: nothing to convert, no templates yet
+      d.templates = [
+        { id:"A", name:"Workout A", exercises:[] },
+        { id:"B", name:"Workout B", exercises:[] }
+      ];
+    }
+    delete d.plans;
+    delete d.names;
     return d;
   }
 };
@@ -303,22 +328,36 @@ const TIMER = {
 
 /* ============ train state ============ */
 let trainDate = today();
-let trainWorkout = "A";          // "A" | "B" | "C" (cardio)
-let planWhich = "A";
-let draft = {};
+let trainWorkout = "A";          // a template id, or "C" for cardio
+let planWhich = "A";             // template id being edited on the Plan tab
+let draft = [];                  // ordered rows for the day being edited
 let cardioDraft = { minutes:"", miles:"" };
 let justSaved = false;
 let calOpen = false;
 let calMonth = new Date();       // any date inside the shown month
 
 const isCardio = w => w === "C";
-const wLabel = w => w==="C" ? "Cardio" : "Workout "+w;
+const tpl = id => D.templates.find(t => t.id === id);
+const wLabel = w => w==="C" ? "Cardio" : (tpl(w) ? tpl(w).name : "Workout");
+const firstTemplateId = () => (D.templates[0] && D.templates[0].id) || "C";
+
+// keep the two selections pointing at something that still exists
+function ensureSelection(){
+  if(!(trainWorkout === "C" || tpl(trainWorkout))) trainWorkout = firstTemplateId();
+  if(!tpl(planWhich)) planWhich = (D.templates[0] && D.templates[0].id) || null;
+}
 
 function sessionOn(date, w){ return D.sessions.find(s=>s.date===date && s.workout===w); }
 
 function lastLift(name){
   let found = null;
   [...D.sessions].sort((a,b)=>a.date.localeCompare(b.date))
+    .forEach(s => (s.exercises||[]).forEach(e => { if(e.name===name) found = e; }));
+  return found;
+}
+function lastLiftBefore(name, date){
+  let found = null;
+  [...D.sessions].filter(s => s.date < date).sort((a,b)=>a.date.localeCompare(b.date))
     .forEach(s => (s.exercises||[]).forEach(e => { if(e.name===name) found = e; }));
   return found;
 }
@@ -340,17 +379,13 @@ function seedDraft(){
       minutes: ex && ex.cardio ? (ex.cardio.minutes||"") : "",
       miles:   ex && ex.cardio ? (ex.cardio.miles||"")   : ""
     };
+  } else if(ex){
+    // a logged day renders from its own saved snapshot, so editing the plan later never changes it
+    draft = (ex.exercises||[]).map(e => ({ name:e.name, weight:e.weight, sets:e.sets, reps:e.reps }));
   } else {
-    const plan = D.plans[trainWorkout] || [];
-    draft = {};
-    plan.forEach(x=>{
-      const done = ex && (ex.exercises||[]).find(e=>e.name===x.name);
-      draft[x.id] = {
-        weight: done ? done.weight : "",
-        sets:   done ? done.sets : x.sets,
-        reps:   done ? done.reps : x.reps
-      };
-    });
+    // no session yet: start from the current template
+    const t = tpl(trainWorkout);
+    draft = (t ? t.exercises : []).map(x => ({ name:x.name, weight:"", sets:x.sets, reps:x.reps }));
   }
   justSaved = false;
 }
@@ -401,9 +436,9 @@ function viewTrain(){
   if(calOpen) h += calendarHTML();
 
   h += `<div class="seg">
-    ${["A","B","C"].map(w=>{
+    ${[...D.templates.map(t=>t.id), "C"].map(w=>{
       const done = sessionOn(trainDate,w);
-      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"cardio":""}" onclick="pickWorkout('${w}')">${wLabel(w)}${done?' <span class="up">✓</span>':""}</button>`;
+      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"cardio":""}" onclick="pickWorkout('${w}')">${esc(wLabel(w))}${done?' <span class="up">✓</span>':""}</button>`;
     }).join("")}
   </div>`;
 
@@ -429,33 +464,40 @@ function viewTrain(){
     return h + historyHTML();
   }
 
-  const plan = D.plans[trainWorkout] || [];
-  if(!plan.length){
-    return h + `<div class="empty">Workout ${trainWorkout} has no lifts yet.<br>Add them on the Plan tab.</div>` + historyHTML();
+  if(!draft.length){
+    return h + `<div class="empty">${esc(wLabel(trainWorkout))} has no lifts yet.<br>Add one below, or build it out on the Plan tab.</div>`
+      + `<button class="ghost" style="margin-bottom:12px" onclick="addLift()">+ Add a lift to this day</button>`
+      + historyHTML();
   }
 
-  plan.forEach(ex=>{
-    const d = draft[ex.id] || {weight:"",sets:ex.sets,reps:ex.reps};
-    const prev = lastLift(ex.name);
+  draft.forEach((d,i)=>{
+    const prev = lastLiftBefore(d.name, trainDate);
     const up = prev && d.weight !== "" && parseFloat(d.weight) > parseFloat(prev.weight);
+    const title = d.custom
+      ? `<input type="text" placeholder="Exercise name" value="${esc(d.name)}" oninput="setDraft(${i},'name',this.value)"
+           style="font-weight:600;font-size:16px;border:none;background:none;padding:0;width:60%">`
+      : `<h3>${esc(d.name)}</h3>`;
     h += `
     <div class="card">
       <div class="lift">
-        <h3>${esc(ex.name)}</h3>
+        ${title}
         <span class="last ${up?"up":""}">${prev ? `${up?"▲ ":""}last: ${esc(prev.weight)} lb · ${esc(prev.sets)}×${esc(prev.reps)}` : "first time"}</span>
       </div>
       <div class="row">
         <input class="num grow" type="number" inputmode="decimal" placeholder="${prev?esc(prev.weight):"lb"}"
-          value="${esc(d.weight)}" oninput="setDraft(${ex.id},'weight',this.value)">
-        <input class="num sr" type="number" inputmode="numeric" value="${esc(d.sets)}" oninput="setDraft(${ex.id},'sets',this.value)">
+          value="${esc(d.weight)}" oninput="setDraft(${i},'weight',this.value)">
+        <input class="num sr" type="number" inputmode="numeric" value="${esc(d.sets)}" oninput="setDraft(${i},'sets',this.value)">
         <span style="color:var(--dimmer)">×</span>
-        <input class="num sr" type="number" inputmode="numeric" value="${esc(d.reps)}" oninput="setDraft(${ex.id},'reps',this.value)">
+        <input class="num sr" type="number" inputmode="numeric" value="${esc(d.reps)}" oninput="setDraft(${i},'reps',this.value)">
+        <button class="icon" onclick="removeLift(${i})">🗑</button>
       </div>
     </div>`;
   });
 
+  h += `<button class="ghost" style="margin-bottom:12px" onclick="addLift()">+ Add a lift to this day</button>`;
+
   h += `<button class="${justSaved?"saved":"primary"}" onclick="saveSession()">
-    ${justSaved ? "✓ Saved" : existing ? `Update workout ${trainWorkout}` : `Save workout ${trainWorkout}`}
+    ${justSaved ? "✓ Saved" : existing ? `Update ${esc(wLabel(trainWorkout))}` : `Save ${esc(wLabel(trainWorkout))}`}
   </button>`;
 
   return h + historyHTML();
@@ -468,7 +510,7 @@ function historyHTML(){
     const detail = s.workout==="C" ? cardioText(s) : `${(s.exercises||[]).length} lifts`;
     h += `<div class="list-row">
       <button class="tap" onclick="jumpTo('${s.date}','${s.workout}')">
-        ${dow(s.date)} ${shortD(s.date)} <span class="mono" style="color:var(--dimmer)">${s.workout==="C"?"cardio":s.workout}</span>
+        ${dow(s.date)} ${shortD(s.date)} · <span style="color:var(--dimmer)">${esc(wLabel(s.workout))}</span>
       </button>
       <span class="mono" style="font-size:12px;color:var(--dimmer);margin-right:4px">${esc(detail)}</span>
       <button class="icon" onclick="delSession('${s.date}','${s.workout}')">🗑</button>
@@ -479,20 +521,32 @@ function historyHTML(){
 
 /* ============ plan view ============ */
 function viewPlan(){
-  const list = D.plans[planWhich] || [];
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
-  let h = `<div class="eyebrow">The plan</div><h2>Full body · M/W/F</h2>
-    <p class="sub">Sets and reps live here. Weight gets logged per session. Cardio needs no plan — just log it.</p>
+  let h = `<div class="eyebrow">The plan</div><h2>Workout templates</h2>
+    <p class="sub">Build as many templates as you like. Sets and reps live here; weight gets logged per session. Cardio needs no template.</p>
     <div style="height:16px"></div>`;
   if(stale) h += `<div class="warn">${D.lastBackup ? `Last backup: ${ago(D.lastBackup)} days ago.` : "No backup yet."} Export one from the Backup tab.</div>`;
 
-  h += `<div class="seg" style="grid-template-columns:1fr 1fr">${["A","B"].map(w=>
-    `<button class="${planWhich===w?"on":""}" onclick="pickPlan('${w}')">Workout ${w} <span class="mono" style="color:var(--dimmer)">${(D.plans[w]||[]).length}</span></button>`
+  // template selector
+  h += `<div class="seg" style="grid-template-columns:repeat(2,1fr)">${D.templates.map(t=>
+    `<button class="${planWhich===t.id?"on":""}" onclick="pickPlan('${t.id}')">${esc(t.name)} <span class="mono" style="color:var(--dimmer)">${t.exercises.length}</span></button>`
   ).join("")}</div>`;
+  h += `<button class="ghost" style="margin-bottom:12px" onclick="addTemplate()">+ New template</button>`;
 
-  if(list.length){
+  const t = tpl(planWhich);
+  if(!t){
+    return h + `<div class="empty">No template selected.<br>Add one above to get started.</div>`;
+  }
+
+  h += `<div class="card">
+    <label class="sub" style="display:block;margin-bottom:6px">Name</label>
+    <input type="text" value="${esc(t.name)}" placeholder="Template name" onchange="renameTemplate('${t.id}', this.value)">
+    <p class="sub" style="margin-top:8px">Editing this template only changes future workouts — anything already logged keeps what you recorded.</p>
+  </div>`;
+
+  if(t.exercises.length){
     h += `<div class="card">`;
-    list.forEach(ex=>{
+    t.exercises.forEach(ex=>{
       h += `<div class="list-row">
         <span class="grow" style="font-weight:500">${esc(ex.name)}</span>
         <input class="num sr" type="number" inputmode="numeric" value="${esc(ex.sets)}" onchange="editPlan(${ex.id},'sets',this.value)">
@@ -503,11 +557,11 @@ function viewPlan(){
     });
     h += `</div>`;
   } else {
-    h += `<div class="empty">Workout ${planWhich} is empty.</div><div style="height:12px"></div>`;
+    h += `<div class="empty">${esc(t.name)} is empty.</div><div style="height:12px"></div>`;
   }
 
   h += `<div class="card">
-    <input type="text" id="newName" placeholder="Add a lift to workout ${planWhich}">
+    <input type="text" id="newName" placeholder="Add a lift to ${esc(t.name)}">
     <div class="row" style="margin:12px 0">
       <input class="num" style="width:64px" type="number" inputmode="numeric" id="newSets" value="3">
       <span style="color:var(--dimmer)">sets ×</span>
@@ -516,6 +570,8 @@ function viewPlan(){
     </div>
     <button class="ghost" onclick="addPlan()">+ Add exercise</button>
   </div>`;
+
+  h += `<button class="ghost" style="color:var(--bad)" onclick="deleteTemplate('${t.id}')">Delete “${esc(t.name)}” template</button>`;
   return h;
 }
 
@@ -637,7 +693,7 @@ function viewBackup(){
   <button class="ghost" onclick="document.getElementById('impFile').click()">⬆ Restore from a backup file</button>
   ${note ? `<p class="ok">${esc(note)}</p>` : ""}
   <p class="sub" style="margin-top:16px;line-height:1.5">
-    Export writes one JSON file holding both plans, every session, every weigh-in, and every photo.
+    Export writes one JSON file holding every template, session, weigh-in, and photo.
     In the share sheet choose Save to Files → iCloud Drive. Restoring replaces everything currently in the app.
   </p>
   <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>`;
@@ -647,15 +703,16 @@ function viewBackup(){
 function shiftDay(n){ const d = pd(trainDate); d.setDate(d.getDate()+n); trainDate = iso(d); calMonth = pd(trainDate); seedDraft(); render(); }
 function pickWorkout(w){ trainWorkout = w; seedDraft(); render(); }
 function jumpTo(date,w){ trainDate=date; trainWorkout=w; calMonth=pd(date); calOpen=false; seedDraft(); render(); }
-function setDraft(id,f,v){ if(!draft[id]) draft[id]={}; draft[id][f]=v; justSaved=false; }
+function setDraft(i,f,v){ if(draft[i]){ draft[i][f]=v; justSaved=false; } }
 function setCardio(f,v){ cardioDraft[f]=v; justSaved=false; }
+function addLift(){ draft.push({ name:"", weight:"", sets:"3", reps:"10", custom:true }); justSaved=false; render(); }
+function removeLift(i){ draft.splice(i,1); justSaved=false; render(); }
 
 function saveSession(){
-  const plan = D.plans[trainWorkout] || [];
-  const exercises = plan
-    .filter(ex => draft[ex.id] && draft[ex.id].weight !== "")
-    .map(ex => ({ name:ex.name, weight:draft[ex.id].weight, sets:draft[ex.id].sets, reps:draft[ex.id].reps }));
-  if(!exercises.length){ err="Enter at least one weight before saving."; render(); return; }
+  const exercises = draft
+    .filter(r => (r.name||"").trim() !== "" && r.weight !== "")
+    .map(r => ({ name:r.name.trim(), weight:r.weight, sets:r.sets, reps:r.reps }));
+  if(!exercises.length){ err="Enter at least one lift with a weight before saving."; render(); return; }
   D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout===trainWorkout)),
                 { date:trainDate, workout:trainWorkout, exercises }]
                 .sort((a,b)=>b.date.localeCompare(a.date));
@@ -672,26 +729,51 @@ function saveCardio(){
 }
 
 function delSession(date,w){
-  if(!confirm(`Delete ${w==="C"?"cardio":"workout "+w} on ${shortD(date)}?`)) return;
+  if(!confirm(`Delete ${wLabel(w)} on ${shortD(date)}?`)) return;
   D.sessions = D.sessions.filter(s => !(s.date===date && s.workout===w));
   save(); seedDraft(); render();
 }
 
 function pickPlan(w){ planWhich = w; render(); }
+function addTemplate(){
+  const id = "t" + Date.now();
+  D.templates.push({ id, name:"New workout", exercises:[] });
+  planWhich = id;
+  save(); render();
+}
+function renameTemplate(id, v){
+  const t = tpl(id);
+  if(t){ t.name = v.trim() || "Workout"; save(); render(); }
+}
+function deleteTemplate(id){
+  const t = tpl(id);
+  if(!t) return;
+  const used = D.sessions.some(s => s.workout === id);
+  const msg = used
+    ? `Delete the “${t.name}” template? Sessions you already logged under it stay in your history — you just can't start new ones from it.`
+    : `Delete the “${t.name}” template?`;
+  if(!confirm(msg)) return;
+  D.templates = D.templates.filter(x => x.id !== id);
+  ensureSelection();
+  save(); seedDraft(); render();
+}
 function addPlan(){
+  const t = tpl(planWhich); if(!t) return;
   const name = document.getElementById("newName").value.trim();
   if(!name) return;
   const sets = document.getElementById("newSets").value || "3";
   const reps = document.getElementById("newReps").value || "10";
-  D.plans[planWhich] = [...(D.plans[planWhich]||[]), { id:Date.now(), name, sets, reps }];
+  t.exercises.push({ id:Date.now(), name, sets, reps });
   save(); seedDraft(); render();
 }
 function editPlan(id,f,v){
-  D.plans[planWhich] = D.plans[planWhich].map(ex => ex.id===id ? {...ex,[f]:v} : ex);
+  const t = tpl(planWhich); if(!t) return;
+  t.exercises = t.exercises.map(ex => ex.id===id ? {...ex,[f]:v} : ex);
   save(); seedDraft();
 }
 function delPlan(id){
-  D.plans[planWhich] = D.plans[planWhich].filter(ex => ex.id!==id);
+  const t = tpl(planWhich); if(!t) return;
+  t.exercises = t.exercises.filter(ex => ex.id!==id);
   save(); seedDraft(); render();
 }
 
@@ -775,7 +857,7 @@ async function importAll(e){
     const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
     for(const [id,url] of Object.entries(parsed.photos || {})) await IDB.put(id,url);
     D = upgraded;
-    save(); seedDraft();
+    save(); ensureSelection(); seedDraft();
     note = v < SCHEMA
       ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.`
       : "Restored from backup.";
@@ -798,6 +880,7 @@ function render(){
 function go(t){ err=""; note=""; tab=t; if(t==="train") seedDraft(); render(); }
 
 load();
+ensureSelection();
 seedDraft();
 render();
 </script>
