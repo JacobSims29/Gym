@@ -191,7 +191,7 @@ const KEY = "gymlog.v1";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 5;   // bump whenever the saved data shape changes, and add a migration below
+const SCHEMA = 6;   // bump whenever the saved data shape changes, and add a migration below
 const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
 const EMPTY = {
   schema:SCHEMA,
@@ -258,6 +258,17 @@ const MIGRATIONS = {
     if(!d.nutrition.targets) d.nutrition.targets = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
     if(!d.nutrition.foods) d.nutrition.foods = [];
     if(!d.nutrition.log) d.nutrition.log = {};
+    return d;
+  },
+  // 5 → 6: foods can be defined by mass (g) or volume (ml); portions convert within the matching system
+  5(d){
+    const n = d.nutrition;
+    if(n){
+      (n.foods||[]).forEach(f => {
+        if(f.amount === undefined){ f.amount = (f.grams !== undefined ? f.grams : 100); f.refUnit = "g"; delete f.grams; }
+      });
+      Object.values(n.log||{}).forEach(list => (list||[]).forEach(e => { if(!e.base) e.base = "g"; }));
+    }
     return d;
   }
 };
@@ -755,7 +766,9 @@ function viewBackup(){
 
 /* ============ diet ============ */
 const MEALS = ["Breakfast","Lunch","Dinner","Snacks"];
-const UNITS = { g:1, oz:28.3495, lb:453.592 };
+const MASS = { g:1, oz:28.3495, lb:453.592 };                       // → grams
+const VOL  = { ml:1, tbsp:14.7868, "fl oz":29.5735, cup:236.588 };  // → millilitres
+const unitTable = base => base==="ml" ? VOL : MASS;
 
 let dietDate = today();
 let dietSub = "day";              // "day" | "foods" | "goals"
@@ -767,17 +780,17 @@ let foodFilter = "";
 const NUT = () => D.nutrition;
 const round = n => Math.round(n);
 
-// per-gram macros for a library food (nutrition is stored for `grams` reference amount)
-function perGram(food){
-  const g = food.grams || 100;
-  return { cal:(+food.cal||0)/g, protein:(+food.protein||0)/g, carb:(+food.carb||0)/g, fat:(+food.fat||0)/g };
+// per-base-unit macros for a library food (nutrition stored for `amount` of `refUnit`)
+function perBase(food){
+  const a = food.amount || 1;
+  return { cal:(+food.cal||0)/a, protein:(+food.protein||0)/a, carb:(+food.carb||0)/a, fat:(+food.fat||0)/a };
 }
-// grams for a log entry
-function entryGrams(e){ return (+e.qty||0) * (UNITS[e.unit]||1); }
+// base-unit quantity (grams or ml) for a log entry
+function entryBase(e){ const t = unitTable(e.base); return (+e.qty||0) * (t[e.unit]||1); }
 // macro totals for a log entry (uses the snapshot taken when it was added)
 function entryMacros(e){
-  const g = entryGrams(e), p = e.per || {cal:0,protein:0,carb:0,fat:0};
-  return { cal:g*p.cal, protein:g*p.protein, carb:g*p.carb, fat:g*p.fat };
+  const b = entryBase(e), p = e.per || {cal:0,protein:0,carb:0,fat:0};
+  return { cal:b*p.cal, protein:b*p.protein, carb:b*p.carb, fat:b*p.fat };
 }
 function dayEntries(ds){ return NUT().log[ds] || []; }
 function dayTotals(ds){
@@ -864,9 +877,9 @@ function dietDay(){
         <div style="flex:1">
           <div class="fn">${esc(e.name || (food?food.name:"(deleted food)"))}</div>
           <div class="qty">
-            <input class="num" type="number" inputmode="decimal" value="${esc(e.qty)}" oninput="setEntryQty('${e.id}',this.value)">
+            <input class="num" type="number" inputmode="decimal" value="${esc(e.qty)}" onchange="setEntryQty('${e.id}',this.value)">
             <select onchange="setEntryUnit('${e.id}',this.value)">
-              ${Object.keys(UNITS).map(u=>`<option value="${u}" ${e.unit===u?"selected":""}>${u}</option>`).join("")}
+              ${Object.keys(unitTable(e.base)).map(u=>`<option value="${u}" ${e.unit===u?"selected":""}>${u}</option>`).join("")}
             </select>
             <button class="icon" onclick="delEntry('${e.id}')">🗑</button>
           </div>
@@ -884,16 +897,17 @@ function dietDay(){
 function addPicker(meal){
   const foods = NUT().foods.filter(f => !foodFilter || f.name.toLowerCase().includes(foodFilter.toLowerCase()));
   let h = `<div class="addbox">
-    <input type="text" placeholder="Filter your foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
+    <input type="text" id="dietFilter" placeholder="Filter your foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
   if(!NUT().foods.length){
     h += `<p class="sub" style="margin-top:8px">No foods yet. Add some on the Foods tab first.</p>`;
   } else if(!foods.length){
     h += `<p class="sub" style="margin-top:8px">No matches.</p>`;
   } else {
     foods.slice(0,20).forEach(f=>{
-      const pg = perGram(f);
+      const pb = perBase(f);
+      const u = f.refUnit || "g";
       h += `<div class="pickrow">
-        <div><div class="fn">${esc(f.name)}</div><div class="fq">${round(pg.cal*100)} cal · ${round(pg.protein*100)}p / 100g</div></div>
+        <div><div class="fn">${esc(f.name)}</div><div class="fq">${round(pb.cal*100)} cal · ${round(pb.protein*100)}p / 100${u}</div></div>
         <button class="padd" onclick="addEntry('${meal}','${f.id}')">Add</button>
       </div>`;
     });
@@ -903,34 +917,42 @@ function addPicker(meal){
 }
 
 function dietFoods(){
-  let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount in grams; any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
+  let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
   NUT().foods.forEach(f=>{
+    const u = f.refUnit || "g";
     h += `<div class="foodcard">
       <input type="text" value="${esc(f.name)}" placeholder="Food name" onchange="editFood('${f.id}','name',this.value)">
+      <div class="qty" style="margin-top:8px">
+        <span class="sub">per</span>
+        <input class="num" style="width:70px" type="number" inputmode="decimal" value="${esc(f.amount)}" onchange="editFood('${f.id}','amount',this.value)">
+        <select onchange="editFood('${f.id}','refUnit',this.value)">
+          <option value="g" ${u==="g"?"selected":""}>g</option>
+          <option value="ml" ${u==="ml"?"selected":""}>ml</option>
+        </select>
+      </div>
       <div class="macros">
-        <div><label>amount (g)</label><input class="num" type="number" inputmode="decimal" value="${esc(f.grams)}" onchange="editFood('${f.id}','grams',this.value)"></div>
         <div><label>calories</label><input class="num" type="number" inputmode="decimal" value="${esc(f.cal)}" onchange="editFood('${f.id}','cal',this.value)"></div>
         <div><label>protein g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.protein)}" onchange="editFood('${f.id}','protein',this.value)"></div>
         <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.carb)}" onchange="editFood('${f.id}','carb',this.value)"></div>
-      </div>
-      <div class="macros" style="grid-template-columns:1fr 1fr;margin-top:6px">
         <div><label>fat g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.fat)}" onchange="editFood('${f.id}','fat',this.value)"></div>
-        <div style="display:flex;align-items:flex-end"><button class="ghost" style="color:var(--bad)" onclick="delFood('${f.id}')">Delete</button></div>
       </div>
+      <button class="ghost" style="color:var(--bad);margin-top:8px" onclick="delFood('${f.id}')">Delete ${esc(f.name)}</button>
     </div>`;
   });
   h += `<div class="foodcard">
     <input type="text" id="nfName" placeholder="New food name">
+    <div class="qty" style="margin-top:8px">
+      <span class="sub">per</span>
+      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="100">
+      <select id="nfUnit"><option value="g">g</option><option value="ml">ml</option></select>
+    </div>
     <div class="macros">
-      <div><label>amount (g)</label><input class="num" type="number" inputmode="decimal" id="nfGrams" value="100"></div>
       <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0"></div>
       <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0"></div>
       <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0"></div>
-    </div>
-    <div class="macros" style="grid-template-columns:1fr 1fr;margin-top:6px">
       <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0"></div>
-      <div style="display:flex;align-items:flex-end"><button class="primary" onclick="addFood()">+ Add food</button></div>
     </div>
+    <button class="primary" style="margin-top:10px" onclick="addFood()">+ Add food</button>
   </div>`;
   return h;
 }
@@ -966,7 +988,8 @@ function setFoodFilter(v){ foodFilter=v; render(); }
 function addEntry(meal, foodId){
   const food = NUT().foods.find(f=>f.id===foodId);
   if(!food) return;
-  const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:100, unit:"g", per:perGram(food) };
+  const base = food.refUnit || "g";
+  const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:(food.amount||100), unit:base, base, per:perBase(food) };
   if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
   NUT().log[dietDate].push(entry);
   save(); render();
@@ -989,7 +1012,8 @@ function addFood(){
   const num = id => parseFloat(document.getElementById(id).value) || 0;
   NUT().foods.push({
     id:"f"+Date.now(), name,
-    grams: num("nfGrams")||100,
+    amount: num("nfAmount")||100,
+    refUnit: document.getElementById("nfUnit").value,
     cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fat:num("nfF")
   });
   NUT().foods.sort((a,b)=>a.name.localeCompare(b.name));
@@ -998,9 +1022,9 @@ function addFood(){
 function editFood(id,f,v){
   const food = NUT().foods.find(x=>x.id===id);
   if(!food) return;
-  food[f] = (f==="name") ? v : (parseFloat(v)||0);
+  food[f] = (f==="name" || f==="refUnit") ? v : (parseFloat(v)||0);
   save();
-  if(f==="name") render();
+  if(f==="name" || f==="refUnit") render();
 }
 function delFood(id){
   const food = NUT().foods.find(x=>x.id===id);
@@ -1179,12 +1203,26 @@ async function importAll(e){
 
 /* ============ render ============ */
 function render(){
+  // remember which text field was focused, so a re-render doesn't drop the keyboard mid-type
+  const act = document.activeElement;
+  let focus = null;
+  if(act && act.id && act.tagName === "INPUT"){
+    let sel = null;
+    try { sel = { s:act.selectionStart, e:act.selectionEnd }; } catch(_) {}
+    focus = { id:act.id, sel };
+  }
+
   const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, photos:viewPhotos, backup:viewBackup };
   document.getElementById("app").innerHTML =
     (err ? `<div class="err">${esc(err)}</div>` : "") + views[tab]();
   document.getElementById("nav").innerHTML =
     [["train","Train"],["plan","Plan"],["diet","Diet"],["weight","Weight"],["photos","Photos"],["backup","Backup"]]
     .map(([id,label]) => `<button class="${tab===id?"on":""}" onclick="go('${id}')">${label}</button>`).join("");
+
+  if(focus){
+    const el = document.getElementById(focus.id);
+    if(el){ el.focus(); if(focus.sel){ try { el.setSelectionRange(focus.sel.s, focus.sel.e); } catch(_) {} } }
+  }
   if(tab === "photos") paintPhotos();
   TIMER.draw();
 }
