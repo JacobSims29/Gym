@@ -53,10 +53,47 @@
   .seg button.on.cardio{border-color:var(--cardio)}
 
   .nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
-    display:grid;grid-template-columns:repeat(5,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
-  .nav button{background:none;border-radius:0;font-size:11px;font-weight:600;color:var(--dimmer);
+    display:grid;grid-template-columns:repeat(6,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
+  .nav button{background:none;border-radius:0;font-size:10px;font-weight:600;color:var(--dimmer);
     padding:14px 0;border-top:2px solid transparent}
   .nav button.on{color:var(--accent);border-top-color:var(--accent)}
+
+  /* diet */
+  .subseg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:14px}
+  .subseg button{border:1px solid var(--line);background:var(--card);color:var(--dimmer);padding:10px 4px;font-size:13px}
+  .subseg button.on{border-color:var(--accent);background:#262626;color:var(--text)}
+  .toggle{display:inline-grid;grid-template-columns:1fr 1fr;gap:4px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:3px;margin-bottom:14px}
+  .toggle button{padding:8px 18px;font-size:13px;border-radius:6px;color:var(--dimmer);background:none}
+  .toggle button.on{background:#262626;color:var(--accent)}
+  .kcal{font-size:40px;font-weight:700;letter-spacing:-.02em}
+  .kcal span{font-size:15px;font-weight:500;color:var(--dimmer)}
+  .bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden;margin:10px 0}
+  .bar>div{height:100%;border-radius:5px}
+  .macro{margin-top:12px}
+  .macro .top{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px}
+  .macro .val{font-size:13px}
+  .mbar{height:6px;border-radius:3px;background:var(--bg);overflow:hidden}
+  .mbar>div{height:100%}
+  .meal{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden}
+  .meal .mh{display:flex;align-items:center;justify-content:space-between;padding:14px 16px}
+  .meal .mh h3{font-size:17px;font-weight:600}
+  .pill{font-size:12px;font-family:ui-monospace,Menlo,monospace;background:#1e293b;color:#93c5fd;padding:3px 8px;border-radius:10px;margin-left:6px}
+  .pill.p{background:#2e1065;color:#c4b5fd}
+  .fitem{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-top:1px solid var(--line)}
+  .fitem .fn{font-size:15px}
+  .fitem .fq{font-size:12px;color:var(--dimmer);margin-top:2px}
+  .fitem .fm{text-align:right;font-size:13px}
+  .plus{width:auto;padding:6px 10px;background:none;color:var(--accent);font-size:20px}
+  .addbox{padding:0 16px 14px}
+  .pickrow{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+  .pickrow button.padd{width:auto;padding:6px 12px;background:#262626;color:var(--text);font-size:13px}
+  .qty{display:flex;gap:6px;align-items:center;margin-top:6px}
+  .qty input{width:70px;padding:8px;text-align:center}
+  .qty select{width:auto;padding:8px;background:var(--bg);border:1px solid var(--line2);border-radius:6px;color:var(--text);font-size:14px}
+  .foodcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:10px}
+  .foodcard .macros{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+  .foodcard .macros label{font-size:10px;color:var(--dimmer);display:block;text-align:center;margin-bottom:2px}
+  .foodcard .macros input{padding:8px 4px;text-align:center;font-size:14px}
 
   .lift{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
   .lift h3{font-size:16px;font-weight:600}
@@ -154,8 +191,14 @@ const KEY = "gymlog.v1";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 4;   // bump whenever the saved data shape changes, and add a migration below
-const EMPTY = { schema:SCHEMA, templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}], sessions:[], weights:[], photos:[], lastBackup:null };
+const SCHEMA = 5;   // bump whenever the saved data shape changes, and add a migration below
+const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
+const EMPTY = {
+  schema:SCHEMA,
+  templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}],
+  sessions:[], weights:[], photos:[], lastBackup:null,
+  nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{} }
+};
 
 let D = structuredClone(EMPTY);
 let tab = "train", err = "", note = "";
@@ -207,6 +250,14 @@ const MIGRATIONS = {
     }
     delete d.plans;
     delete d.names;
+    return d;
+  },
+  // 4 → 5: nutrition tracker added
+  4(d){
+    if(!d.nutrition) d.nutrition = { targets:{ calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 }, foods:[], log:{} };
+    if(!d.nutrition.targets) d.nutrition.targets = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
+    if(!d.nutrition.foods) d.nutrition.foods = [];
+    if(!d.nutrition.log) d.nutrition.log = {};
     return d;
   }
 };
@@ -390,8 +441,8 @@ function seedDraft(){
   justSaved = false;
 }
 
-/* ============ calendar ============ */
-function calendarHTML(){
+/* ============ calendar (shared) ============ */
+function monthCalendar(sel, pickFn, dotsFn){
   const first = new Date(calMonth.getFullYear(), calMonth.getMonth(), 1);
   const days = new Date(calMonth.getFullYear(), calMonth.getMonth()+1, 0).getDate();
   let cells = "";
@@ -399,10 +450,9 @@ function calendarHTML(){
   for(let i=0;i<first.getDay();i++) cells += `<div class="cd blank"></div>`;
   for(let d=1; d<=days; d++){
     const ds = iso(new Date(calMonth.getFullYear(), calMonth.getMonth(), d));
-    const marks = D.sessions.filter(s=>s.date===ds);
-    const dots = marks.map(s=>`<span class="dot ${s.workout==="C"?"c":""}"></span>`).join("");
-    const cls = ["cd", ds===trainDate?"sel":"", ds===today()?"today":""].filter(Boolean).join(" ");
-    cells += `<button class="${cls}" onclick="pickDate('${ds}')">${d}<span class="dots">${dots}</span></button>`;
+    const dots = dotsFn ? dotsFn(ds) : "";
+    const cls = ["cd", ds===sel?"sel":"", ds===today()?"today":""].filter(Boolean).join(" ");
+    cells += `<button class="${cls}" onclick="${pickFn}('${ds}')">${d}<span class="dots">${dots}</span></button>`;
   }
   return `<div class="cal">
     <div class="calhdr">
@@ -411,9 +461,13 @@ function calendarHTML(){
       <button class="arrow" onclick="shiftMonth(1)">›</button>
     </div>
     <div class="calgrid">${cells}</div>
-    <button class="ghost" style="margin-top:10px;padding:10px;font-size:13px" onclick="pickDate('${today()}')">Jump to today</button>
+    <button class="ghost" style="margin-top:10px;padding:10px;font-size:13px" onclick="${pickFn}('${today()}')">Jump to today</button>
   </div>`;
 }
+function trainDots(ds){
+  return D.sessions.filter(s=>s.date===ds).map(s=>`<span class="dot ${s.workout==="C"?"c":""}"></span>`).join("");
+}
+function calendarHTML(){ return monthCalendar(trainDate, "pickDate", trainDots); }
 function shiftMonth(n){ calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth()+n, 1); render(); }
 function pickDate(ds){ trainDate = ds; calMonth = pd(ds); calOpen = false; seedDraft(); render(); }
 function toggleCal(){ calOpen = !calOpen; if(calOpen) calMonth = pd(trainDate); render(); }
@@ -699,6 +753,263 @@ function viewBackup(){
   <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>`;
 }
 
+/* ============ diet ============ */
+const MEALS = ["Breakfast","Lunch","Dinner","Snacks"];
+const UNITS = { g:1, oz:28.3495, lb:453.592 };
+
+let dietDate = today();
+let dietSub = "day";              // "day" | "foods" | "goals"
+let dietRemaining = false;        // Consumed vs Remaining toggle
+let dietCalOpen = false;
+let addingMeal = null;            // meal name we're adding a food to
+let foodFilter = "";
+
+const NUT = () => D.nutrition;
+const round = n => Math.round(n);
+
+// per-gram macros for a library food (nutrition is stored for `grams` reference amount)
+function perGram(food){
+  const g = food.grams || 100;
+  return { cal:(+food.cal||0)/g, protein:(+food.protein||0)/g, carb:(+food.carb||0)/g, fat:(+food.fat||0)/g };
+}
+// grams for a log entry
+function entryGrams(e){ return (+e.qty||0) * (UNITS[e.unit]||1); }
+// macro totals for a log entry (uses the snapshot taken when it was added)
+function entryMacros(e){
+  const g = entryGrams(e), p = e.per || {cal:0,protein:0,carb:0,fat:0};
+  return { cal:g*p.cal, protein:g*p.protein, carb:g*p.carb, fat:g*p.fat };
+}
+function dayEntries(ds){ return NUT().log[ds] || []; }
+function dayTotals(ds){
+  return dayEntries(ds).reduce((t,e)=>{
+    const m = entryMacros(e);
+    t.cal+=m.cal; t.protein+=m.protein; t.carb+=m.carb; t.fat+=m.fat; return t;
+  }, {cal:0,protein:0,carb:0,fat:0});
+}
+function dietDots(ds){
+  return (NUT().log[ds] && NUT().log[ds].length) ? `<span class="dot" style="background:var(--cardio)"></span>` : "";
+}
+
+function macroRow(label, val, min, max, color){
+  const pct = max>0 ? Math.min(100, (val/max)*100) : 0;
+  const ok = val>=min && (max===0 || val<=max);
+  return `<div class="macro">
+    <div class="top"><span>${label}</span>
+      <span class="val">${ok?'<span class="up">✓</span> ':''}<b>${round(val)}</b> <span style="color:var(--dimmer)">/ ${min}-${max}g</span></span>
+    </div>
+    <div class="mbar"><div style="width:${pct}%;background:${color}"></div></div>
+  </div>`;
+}
+
+function viewDiet(){
+  let h = `<div class="eyebrow">Nutrition</div><h2>Diet</h2><div style="height:14px"></div>`;
+  h += `<div class="subseg">
+    ${[["day","Day"],["foods","Foods"],["goals","Goals"]].map(([id,label])=>
+      `<button class="${dietSub===id?"on":""}" onclick="setDietSub('${id}')">${label}</button>`).join("")}
+  </div>`;
+  if(dietSub==="foods") return h + dietFoods();
+  if(dietSub==="goals") return h + dietGoals();
+  return h + dietDay();
+}
+
+function dietDay(){
+  const t = NUT().targets;
+  const tot = dayTotals(dietDate);
+
+  let h = `
+  <div class="hdr">
+    <button class="arrow" onclick="shiftDietDay(-1)">‹</button>
+    <div class="mid" onclick="toggleDietCal()">
+      <div class="eyebrow">${dow(dietDate)}</div>
+      <h2>${shortD(dietDate)}</h2>
+      <div class="caret">${dietCalOpen ? "▲ close calendar" : "▼ pick a date"}</div>
+    </div>
+    <button class="arrow" onclick="shiftDietDay(1)">›</button>
+  </div>`;
+  if(dietCalOpen) h += monthCalendar(dietDate, "pickDietDate", dietDots);
+
+  // summary card
+  const remaining = dietRemaining;
+  const calShown = remaining ? Math.max(0, t.calMax - tot.cal) : tot.cal;
+  const calPct = t.calMax>0 ? Math.min(100, (tot.cal/t.calMax)*100) : 0;
+  const calOk = tot.cal>=t.calMin && tot.cal<=t.calMax;
+  h += `<div class="card">
+    <div class="toggle">
+      <button class="${!remaining?"on":""}" onclick="setRemaining(false)">Consumed</button>
+      <button class="${remaining?"on":""}" onclick="setRemaining(true)">Remaining</button>
+    </div>
+    <div class="kcal">${round(calShown)} <span>/ ${t.calMin}-${t.calMax} cal${remaining?" left":""}</span></div>
+    <div class="bar"><div style="width:${calPct}%;background:${calOk?'var(--good)':'var(--cardio)'}"></div></div>
+    ${macroRow("Protein", remaining?Math.max(0,t.pMax-tot.protein):tot.protein, t.pMin, t.pMax, "#c4b5fd")}
+    ${macroRow("Carbs",   remaining?Math.max(0,t.cMax-tot.carb):tot.carb,       t.cMin, t.cMax, "var(--good)")}
+    ${macroRow("Fat",     remaining?Math.max(0,t.fMax-tot.fat):tot.fat,         t.fMin, t.fMax, "var(--accent)")}
+  </div>`;
+
+  // meals
+  MEALS.forEach(meal=>{
+    const entries = dayEntries(dietDate).filter(e=>e.meal===meal);
+    const mt = entries.reduce((s,e)=>{ const m=entryMacros(e); s.cal+=m.cal; s.p+=m.protein; return s; }, {cal:0,p:0});
+    h += `<div class="meal">
+      <div class="mh">
+        <h3>${meal}</h3>
+        <div>
+          <span class="pill">${round(mt.cal)} Cal</span><span class="pill p">${round(mt.p)} P</span>
+          <button class="plus" onclick="startAdd('${meal}')">+</button>
+        </div>
+      </div>`;
+    entries.forEach(e=>{
+      const food = NUT().foods.find(f=>f.id===e.foodId);
+      const m = entryMacros(e);
+      h += `<div class="fitem">
+        <div style="flex:1">
+          <div class="fn">${esc(e.name || (food?food.name:"(deleted food)"))}</div>
+          <div class="qty">
+            <input class="num" type="number" inputmode="decimal" value="${esc(e.qty)}" oninput="setEntryQty('${e.id}',this.value)">
+            <select onchange="setEntryUnit('${e.id}',this.value)">
+              ${Object.keys(UNITS).map(u=>`<option value="${u}" ${e.unit===u?"selected":""}>${u}</option>`).join("")}
+            </select>
+            <button class="icon" onclick="delEntry('${e.id}')">🗑</button>
+          </div>
+        </div>
+        <div class="fm"><b>${round(m.cal)}</b> cal<br><span style="color:var(--dimmer)">${round(m.protein)}g protein</span></div>
+      </div>`;
+    });
+    if(addingMeal===meal) h += addPicker(meal);
+    h += `</div>`;
+  });
+
+  return h;
+}
+
+function addPicker(meal){
+  const foods = NUT().foods.filter(f => !foodFilter || f.name.toLowerCase().includes(foodFilter.toLowerCase()));
+  let h = `<div class="addbox">
+    <input type="text" placeholder="Filter your foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
+  if(!NUT().foods.length){
+    h += `<p class="sub" style="margin-top:8px">No foods yet. Add some on the Foods tab first.</p>`;
+  } else if(!foods.length){
+    h += `<p class="sub" style="margin-top:8px">No matches.</p>`;
+  } else {
+    foods.slice(0,20).forEach(f=>{
+      const pg = perGram(f);
+      h += `<div class="pickrow">
+        <div><div class="fn">${esc(f.name)}</div><div class="fq">${round(pg.cal*100)} cal · ${round(pg.protein*100)}p / 100g</div></div>
+        <button class="padd" onclick="addEntry('${meal}','${f.id}')">Add</button>
+      </div>`;
+    });
+  }
+  h += `<button class="ghost" style="margin-top:10px" onclick="cancelAdd()">Done</button></div>`;
+  return h;
+}
+
+function dietFoods(){
+  let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount in grams; any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
+  NUT().foods.forEach(f=>{
+    h += `<div class="foodcard">
+      <input type="text" value="${esc(f.name)}" placeholder="Food name" onchange="editFood('${f.id}','name',this.value)">
+      <div class="macros">
+        <div><label>amount (g)</label><input class="num" type="number" inputmode="decimal" value="${esc(f.grams)}" onchange="editFood('${f.id}','grams',this.value)"></div>
+        <div><label>calories</label><input class="num" type="number" inputmode="decimal" value="${esc(f.cal)}" onchange="editFood('${f.id}','cal',this.value)"></div>
+        <div><label>protein g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.protein)}" onchange="editFood('${f.id}','protein',this.value)"></div>
+        <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.carb)}" onchange="editFood('${f.id}','carb',this.value)"></div>
+      </div>
+      <div class="macros" style="grid-template-columns:1fr 1fr;margin-top:6px">
+        <div><label>fat g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.fat)}" onchange="editFood('${f.id}','fat',this.value)"></div>
+        <div style="display:flex;align-items:flex-end"><button class="ghost" style="color:var(--bad)" onclick="delFood('${f.id}')">Delete</button></div>
+      </div>
+    </div>`;
+  });
+  h += `<div class="foodcard">
+    <input type="text" id="nfName" placeholder="New food name">
+    <div class="macros">
+      <div><label>amount (g)</label><input class="num" type="number" inputmode="decimal" id="nfGrams" value="100"></div>
+      <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0"></div>
+      <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0"></div>
+      <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0"></div>
+    </div>
+    <div class="macros" style="grid-template-columns:1fr 1fr;margin-top:6px">
+      <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0"></div>
+      <div style="display:flex;align-items:flex-end"><button class="primary" onclick="addFood()">+ Add food</button></div>
+    </div>
+  </div>`;
+  return h;
+}
+
+function dietGoals(){
+  const t = NUT().targets;
+  const pair = (label, minKey, maxKey, unit) => `
+    <div class="card">
+      <label class="sub" style="display:block;margin-bottom:8px">${label} (${unit})</label>
+      <div class="qty" style="margin-top:0">
+        <input class="num" type="number" inputmode="numeric" value="${esc(t[minKey])}" onchange="setTarget('${minKey}',this.value)">
+        <span style="color:var(--dimmer)">to</span>
+        <input class="num" type="number" inputmode="numeric" value="${esc(t[maxKey])}" onchange="setTarget('${maxKey}',this.value)">
+      </div>
+    </div>`;
+  return `<p class="sub" style="margin-bottom:12px">Set a range for each. The Day tab shows your progress toward these.</p>`
+    + pair("Calories","calMin","calMax","cal")
+    + pair("Protein","pMin","pMax","g")
+    + pair("Carbs","cMin","cMax","g")
+    + pair("Fat","fMin","fMax","g");
+}
+
+/* diet actions */
+function setDietSub(s){ dietSub=s; addingMeal=null; render(); }
+function shiftDietDay(n){ const d=pd(dietDate); d.setDate(d.getDate()+n); dietDate=iso(d); calMonth=pd(dietDate); addingMeal=null; render(); }
+function pickDietDate(ds){ dietDate=ds; calMonth=pd(ds); dietCalOpen=false; addingMeal=null; render(); }
+function toggleDietCal(){ dietCalOpen=!dietCalOpen; if(dietCalOpen) calMonth=pd(dietDate); render(); }
+function setRemaining(v){ dietRemaining=v; render(); }
+function startAdd(meal){ addingMeal=meal; foodFilter=""; render(); }
+function cancelAdd(){ addingMeal=null; render(); }
+function setFoodFilter(v){ foodFilter=v; render(); }
+
+function addEntry(meal, foodId){
+  const food = NUT().foods.find(f=>f.id===foodId);
+  if(!food) return;
+  const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:100, unit:"g", per:perGram(food) };
+  if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
+  NUT().log[dietDate].push(entry);
+  save(); render();
+}
+function findEntry(id){
+  const list = NUT().log[dietDate] || [];
+  return list.find(e=>e.id===id);
+}
+function setEntryQty(id,v){ const e=findEntry(id); if(e){ e.qty=v; save(); render(); } }
+function setEntryUnit(id,v){ const e=findEntry(id); if(e){ e.unit=v; save(); render(); } }
+function delEntry(id){
+  NUT().log[dietDate] = (NUT().log[dietDate]||[]).filter(e=>e.id!==id);
+  if(!NUT().log[dietDate].length) delete NUT().log[dietDate];
+  save(); render();
+}
+
+function addFood(){
+  const name = document.getElementById("nfName").value.trim();
+  if(!name){ err="Give the food a name."; render(); return; }
+  const num = id => parseFloat(document.getElementById(id).value) || 0;
+  NUT().foods.push({
+    id:"f"+Date.now(), name,
+    grams: num("nfGrams")||100,
+    cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fat:num("nfF")
+  });
+  NUT().foods.sort((a,b)=>a.name.localeCompare(b.name));
+  save(); render();
+}
+function editFood(id,f,v){
+  const food = NUT().foods.find(x=>x.id===id);
+  if(!food) return;
+  food[f] = (f==="name") ? v : (parseFloat(v)||0);
+  save();
+  if(f==="name") render();
+}
+function delFood(id){
+  const food = NUT().foods.find(x=>x.id===id);
+  if(!confirm(`Delete ${food?food.name:"this food"}? Days you've already logged keep their entries.`)) return;
+  NUT().foods = NUT().foods.filter(x=>x.id!==id);
+  save(); render();
+}
+function setTarget(k,v){ NUT().targets[k] = parseFloat(v)||0; save(); }
+
 /* ============ actions ============ */
 function shiftDay(n){ const d = pd(trainDate); d.setDate(d.getDate()+n); trainDate = iso(d); calMonth = pd(trainDate); seedDraft(); render(); }
 function pickWorkout(w){ trainWorkout = w; seedDraft(); render(); }
@@ -868,11 +1179,11 @@ async function importAll(e){
 
 /* ============ render ============ */
 function render(){
-  const views = { train:viewTrain, plan:viewPlan, weight:viewWeight, photos:viewPhotos, backup:viewBackup };
+  const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, photos:viewPhotos, backup:viewBackup };
   document.getElementById("app").innerHTML =
     (err ? `<div class="err">${esc(err)}</div>` : "") + views[tab]();
   document.getElementById("nav").innerHTML =
-    [["train","Train"],["plan","Plan"],["weight","Weight"],["photos","Photos"],["backup","Backup"]]
+    [["train","Train"],["plan","Plan"],["diet","Diet"],["weight","Weight"],["photos","Photos"],["backup","Backup"]]
     .map(([id,label]) => `<button class="${tab===id?"on":""}" onclick="go('${id}')">${label}</button>`).join("");
   if(tab === "photos") paintPhotos();
   TIMER.draw();
