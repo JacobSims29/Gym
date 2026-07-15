@@ -904,10 +904,9 @@ function addPicker(meal){
     h += `<p class="sub" style="margin-top:8px">No matches.</p>`;
   } else {
     foods.slice(0,20).forEach(f=>{
-      const pb = perBase(f);
       const u = f.refUnit || "g";
       h += `<div class="pickrow">
-        <div><div class="fn">${esc(f.name)}</div><div class="fq">${round(pb.cal*100)} cal · ${round(pb.protein*100)}p / 100${u}</div></div>
+        <div><div class="fn">${esc(f.name)}</div><div class="fq">adds ${esc(f.amount)}${u} · ${round(+f.cal||0)} cal · ${round(+f.protein||0)}p</div></div>
         <button class="padd" onclick="addEntry('${meal}','${f.id}')">Add</button>
       </div>`;
     });
