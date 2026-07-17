@@ -67,13 +67,14 @@
   .toggle button.on{background:#262626;color:var(--accent)}
   .kcal{font-size:40px;font-weight:700;letter-spacing:-.02em}
   .kcal span{font-size:15px;font-weight:500;color:var(--dimmer)}
-  .bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden;margin:10px 0}
+  .bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden;margin:10px 0;position:relative}
   .bar>div{height:100%;border-radius:5px}
   .macro{margin-top:12px}
   .macro .top{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px}
   .macro .val{font-size:13px}
-  .mbar{height:6px;border-radius:3px;background:var(--bg);overflow:hidden}
+  .mbar{height:6px;border-radius:3px;background:var(--bg);overflow:hidden;position:relative}
   .mbar>div{height:100%}
+  .tick{position:absolute;top:0;bottom:0;width:2px;background:rgba(245,245,245,.6);border-radius:1px}
   .meal{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden}
   .meal .mh{display:flex;align-items:center;justify-content:space-between;padding:14px 16px}
   .meal .mh h3{font-size:17px;font-weight:600}
@@ -855,14 +856,21 @@ function dietDots(ds){
   return (NUT().log[ds] && NUT().log[ds].length) ? `<span class="dot" style="background:var(--cardio)"></span>` : "";
 }
 
-function macroRow(label, val, min, max, color){
-  const pct = max>0 ? Math.min(100, (val/max)*100) : 0;
-  const ok = val>=min && (max===0 || val<=max);
+function macroRow(label, consumed, shown, min, max, color){
+  const scale = max>0 ? max*1.2 : 1;                    // headroom so the max tick sits inside the bar
+  const fillPct = Math.min(100, (consumed/scale)*100);
+  const minPct = (min/scale)*100;
+  const maxPct = (max/scale)*100;
+  const ok = consumed>=min && (max===0 || consumed<=max);
   return `<div class="macro">
     <div class="top"><span>${label}</span>
-      <span class="val">${ok?'<span class="up">✓</span> ':''}<b>${round(val)}</b> <span style="color:var(--dimmer)">/ ${min}-${max}g</span></span>
+      <span class="val">${ok?'<span class="up">✓</span> ':''}<b>${round(shown)}</b> <span style="color:var(--dimmer)">/ ${min}-${max}g</span></span>
     </div>
-    <div class="mbar"><div style="width:${pct}%;background:${color}"></div></div>
+    <div class="mbar">
+      <div style="width:${fillPct}%;background:${color}"></div>
+      <span class="tick" style="left:${minPct}%"></span>
+      <span class="tick" style="left:${maxPct}%"></span>
+    </div>
   </div>`;
 }
 
@@ -895,21 +903,39 @@ function dietDay(){
 
   // summary card
   const remaining = dietRemaining;
-  const calPct = t.calMax>0 ? Math.min(100, (tot.cal/t.calMax)*100) : 0;
+  const calScale = t.calMax>0 ? t.calMax*1.2 : 1;
+  const calFill = Math.min(100, (tot.cal/calScale)*100);
+  const calMinPct = (t.calMin/calScale)*100;
+  const calMaxPct = (t.calMax/calScale)*100;
   const calOk = tot.cal>=t.calMin && tot.cal<=t.calMax;
-  const calHead = remaining
-    ? `${round(t.calMin - tot.cal)}–${round(t.calMax - tot.cal)} <span>cal left</span>`
-    : `${round(tot.cal)} <span>/ ${t.calMin}-${t.calMax} cal</span>`;
+  let calHead;
+  if(remaining){
+    const toMax = round(t.calMax - tot.cal);
+    const toMin = round(t.calMin - tot.cal);
+    if(tot.cal > t.calMax){
+      calHead = `<span style="color:var(--bad)">${toMax}</span> <span>cal left</span>`;   // over top → negative, red
+    } else if(tot.cal >= t.calMin){
+      calHead = `${toMax} <span>cal left</span>`;                                          // in range → to top only
+    } else {
+      calHead = `${toMin}–${toMax} <span>cal left</span>`;                                  // under min → range to go
+    }
+  } else {
+    calHead = `${round(tot.cal)} <span>/ ${t.calMin}-${t.calMax} cal</span>`;
+  }
   h += `<div class="card">
     <div class="toggle">
       <button class="${!remaining?"on":""}" onclick="setRemaining(false)">Consumed</button>
       <button class="${remaining?"on":""}" onclick="setRemaining(true)">Remaining</button>
     </div>
     <div class="kcal">${calHead}</div>
-    <div class="bar"><div style="width:${calPct}%;background:${calOk?'var(--good)':'var(--cardio)'}"></div></div>
-    ${macroRow("Protein", remaining?Math.max(0,t.pMax-tot.protein):tot.protein, t.pMin, t.pMax, "#c4b5fd")}
-    ${macroRow("Carbs",   remaining?Math.max(0,t.cMax-tot.carb):tot.carb,       t.cMin, t.cMax, "var(--good)")}
-    ${macroRow("Fat",     remaining?Math.max(0,t.fMax-tot.fat):tot.fat,         t.fMin, t.fMax, "var(--accent)")}
+    <div class="bar">
+      <div style="width:${calFill}%;background:${calOk?'var(--good)':'var(--cardio)'}"></div>
+      <span class="tick" style="left:${calMinPct}%"></span>
+      <span class="tick" style="left:${calMaxPct}%"></span>
+    </div>
+    ${macroRow("Protein", tot.protein, remaining?Math.max(0,t.pMax-tot.protein):tot.protein, t.pMin, t.pMax, "#c4b5fd")}
+    ${macroRow("Carbs",   tot.carb,    remaining?Math.max(0,t.cMax-tot.carb):tot.carb,       t.cMin, t.cMax, "var(--good)")}
+    ${macroRow("Fat",     tot.fat,     remaining?Math.max(0,t.fMax-tot.fat):tot.fat,         t.fMin, t.fMax, "var(--accent)")}
   </div>`;
 
   // meals
