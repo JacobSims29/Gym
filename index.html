@@ -102,8 +102,7 @@
   .exname{font-size:16px;font-weight:600;background:var(--bg);border:1px solid var(--line);border-radius:6px;
     color:var(--text);padding:8px 10px;width:100%}
   .exname:focus{outline:none;border-color:var(--accent)}
-  .lift .exname{width:52%;font-weight:600}
-  .planrow{display:flex;align-items:center;gap:6px;padding:8px 0;border-bottom:1px solid var(--line)}
+  .planrow{padding:12px 0;border-bottom:1px solid var(--line)}
   .planrow:last-child{border-bottom:none}
   .down{color:var(--bad)}
   button.icon:disabled{opacity:.25}
@@ -176,7 +175,7 @@
 <div class="wrap" id="app"></div>
 
 <button class="fab" id="fab" onclick="TIMER.open()">⏱</button>
-<div class="timer hide" id="timer">
+<div class="timer" id="timer" style="display:none">
   <div class="card">
     <div class="row" style="justify-content:space-between;margin-bottom:10px">
       <span class="eyebrow" style="color:var(--dimmer)">Rest</span>
@@ -590,11 +589,9 @@ function viewTrain(){
     const prev = lastLiftBefore(d.name, trainDate);
     h += `
     <div class="card">
-      <div class="lift">
-        <input class="exname" type="text" placeholder="Exercise name" value="${esc(d.name)}"
-          oninput="setDraft(${i},'name',this.value)">
-        <span class="last" id="hint-${i}">${rowHintInner(d, prev)}</span>
-      </div>
+      <input class="exname" type="text" placeholder="Exercise name" value="${esc(d.name)}"
+        oninput="setDraft(${i},'name',this.value)">
+      <div class="last" id="hint-${i}" style="margin:8px 2px 12px">${rowHintInner(d, prev)}</div>
       <div class="row">
         <input class="num grow" type="number" inputmode="decimal" placeholder="${prev?esc(prev.weight):"lb"}"
           value="${esc(d.weight)}" oninput="setDraft(${i},'weight',this.value)">
@@ -662,13 +659,16 @@ function viewPlan(){
     h += `<div class="card">`;
     t.exercises.forEach((ex,i)=>{
       h += `<div class="planrow">
-        <input class="exname grow" type="text" value="${esc(ex.name)}" onchange="editPlan(${ex.id},'name',this.value)">
-        <input class="num sr" type="number" inputmode="numeric" value="${esc(ex.sets)}" onchange="editPlan(${ex.id},'sets',this.value)">
-        <span style="color:var(--dimmer);font-size:13px">×</span>
-        <input class="num sr" type="number" inputmode="numeric" value="${esc(ex.reps)}" onchange="editPlan(${ex.id},'reps',this.value)">
-        <button class="icon" onclick="movePlan(${ex.id},-1)" ${i===0?"disabled":""}>↑</button>
-        <button class="icon" onclick="movePlan(${ex.id},1)" ${i===t.exercises.length-1?"disabled":""}>↓</button>
-        <button class="icon" onclick="delPlan(${ex.id})">🗑</button>
+        <input class="exname" type="text" value="${esc(ex.name)}" onchange="editPlan(${ex.id},'name',this.value)">
+        <div class="row" style="margin-top:8px">
+          <input class="num sr" type="number" inputmode="numeric" value="${esc(ex.sets)}" onchange="editPlan(${ex.id},'sets',this.value)">
+          <span style="color:var(--dimmer);font-size:13px">×</span>
+          <input class="num sr" type="number" inputmode="numeric" value="${esc(ex.reps)}" onchange="editPlan(${ex.id},'reps',this.value)">
+          <span class="grow"></span>
+          <button class="icon" onclick="movePlan(${ex.id},-1)" ${i===0?"disabled":""}>↑</button>
+          <button class="icon" onclick="movePlan(${ex.id},1)" ${i===t.exercises.length-1?"disabled":""}>↓</button>
+          <button class="icon" onclick="delPlan(${ex.id})">🗑</button>
+        </div>
       </div>`;
     });
     h += `</div>`;
