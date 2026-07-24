@@ -53,8 +53,8 @@
   .seg button.on.cardio{border-color:var(--cardio)}
 
   .nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
-    display:grid;grid-template-columns:repeat(6,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
-  .nav button{background:none;border-radius:0;font-size:10px;font-weight:600;color:var(--dimmer);
+    display:grid;grid-template-columns:repeat(5,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
+  .nav button{background:none;border-radius:0;font-size:11px;font-weight:600;color:var(--dimmer);
     padding:14px 0;border-top:2px solid transparent}
   .nav button.on{color:var(--accent);border-top-color:var(--accent)}
 
@@ -103,6 +103,15 @@
   .exname{font-size:16px;font-weight:600;background:var(--bg);border:1px solid var(--line);border-radius:6px;
     color:var(--text);padding:8px 10px;width:100%}
   .exname:focus{outline:none;border-color:var(--accent)}
+  .exhead{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none}
+  .exname-d{font-size:16px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .setshead{display:grid;grid-template-columns:38px 1fr 1fr 40px;gap:8px;align-items:center;
+    font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dimmer);margin-bottom:6px}
+  .setshead span{text-align:center}
+  .setshead span:first-child{text-align:left}
+  .setrow{display:grid;grid-template-columns:38px 1fr 1fr 40px;gap:8px;align-items:center;margin-bottom:8px}
+  .setnum{font-family:ui-monospace,Menlo,monospace;font-weight:700;color:var(--dim);text-align:center;
+    background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px 0}
   .planrow{padding:12px 0;border-bottom:1px solid var(--line)}
   .planrow:last-child{border-bottom:none}
   .down{color:var(--bad)}
@@ -201,12 +210,13 @@ const KEY = "gymlog.v1";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 7;   // bump whenever the saved data shape changes, and add a migration below
+const SCHEMA = 8;   // bump whenever the saved data shape changes, and add a migration below
 const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
 const EMPTY = {
   schema:SCHEMA,
   templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}],
   sessions:[], weights:[], photos:[], lastBackup:null,
+  scratch:{},
   nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{} }
 };
 
@@ -284,6 +294,21 @@ const MIGRATIONS = {
   // 6 → 7: (steps feature removed; kept as a no-op so v6 data still upgrades)
   6(d){
     return d;
+  },
+  // 7 → 8: each logged exercise becomes a list of individual sets; add scratch store for unsaved entries
+  7(d){
+    (d.sessions||[]).forEach(s => {
+      if(s.exercises){
+        s.exercises = s.exercises.map(e => {
+          if(Array.isArray(e.sets)) return e;                    // already new shape
+          const cnt = parseInt(e.sets, 10) || 1;
+          const one = { weight: e.weight!==undefined ? String(e.weight) : "", reps: e.reps!==undefined ? String(e.reps) : "" };
+          return { name: e.name, sets: Array.from({length:cnt}, () => ({...one})) };
+        });
+      }
+    });
+    if(!d.scratch) d.scratch = {};
+    return d;
   }
 };
 
@@ -306,7 +331,7 @@ function migrate(raw){
 /* ============ storage ============ */
 function save(){
   try{ D.schema = SCHEMA; localStorage.setItem(KEY, JSON.stringify(D)); err=""; }
-  catch(e){ err="Storage is full. Export a backup, then delete some photos."; }
+  catch(e){ err="Storage is full — export a backup to be safe."; }
 }
 function load(){
   try{
@@ -319,42 +344,6 @@ function load(){
       ? `This data was written by a newer version of the app (v${e.message}). Update the app before using it — nothing has been overwritten.`
       : "Saved data looks damaged. Restore from a backup file.";
   }
-}
-const IDB = {
-  db:null,
-  open(){
-    if(this.db) return Promise.resolve(this.db);
-    return new Promise((res,rej)=>{
-      const r = indexedDB.open("gymlog",1);
-      r.onupgradeneeded = () => r.result.createObjectStore("photos");
-      r.onsuccess = () => { this.db=r.result; res(r.result); };
-      r.onerror = () => rej(r.error);
-    });
-  },
-  async tx(m){ const db = await this.open(); return db.transaction("photos",m).objectStore("photos"); },
-  async put(k,v){ const s=await this.tx("readwrite"); return new Promise((res,rej)=>{ const q=s.put(v,k); q.onsuccess=res; q.onerror=()=>rej(q.error); }); },
-  async get(k){ const s=await this.tx("readonly"); return new Promise((res,rej)=>{ const q=s.get(k); q.onsuccess=()=>res(q.result); q.onerror=()=>rej(q.error); }); },
-  async del(k){ const s=await this.tx("readwrite"); return new Promise((res,rej)=>{ const q=s.delete(k); q.onsuccess=res; q.onerror=()=>rej(q.error); }); }
-};
-
-function compress(file){
-  return new Promise((res,rej)=>{
-    const fr = new FileReader();
-    fr.onerror = () => rej(new Error("Couldn't read that file."));
-    fr.onload = e => {
-      const img = new Image();
-      img.onerror = () => rej(new Error("That file isn't an image."));
-      img.onload = () => {
-        const s = Math.min(1, 1000/Math.max(img.width,img.height));
-        const c = document.createElement("canvas");
-        c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
-        c.getContext("2d").drawImage(img,0,0,c.width,c.height);
-        res(c.toDataURL("image/jpeg",0.72));
-      };
-      img.src = e.target.result;
-    };
-    fr.readAsDataURL(file);
-  });
 }
 
 /* ============ rest timer ============ */
@@ -444,6 +433,7 @@ let trainDate = today();
 let trainWorkout = "A";          // a template id, or "C" for cardio
 let planWhich = "A";             // template id being edited on the Plan tab
 let draft = [];                  // ordered rows for the day being edited
+let openEx = {};                 // exercise _uid -> expanded in Train
 let cardioDraft = { minutes:"", miles:"" };
 let justSaved = false;
 let calOpen = false;
@@ -474,6 +464,10 @@ function lastLiftBefore(name, date){
     .forEach(s => (s.exercises||[]).forEach(e => { if(e.name===name) found = e; }));
   return found;
 }
+// total volume of an exercise = sum over its sets of weight*reps
+function exVolume(e){
+  return (e.sets||[]).reduce((v,s)=> v + (parseFloat(s.weight)||0)*(parseFloat(s.reps)||0), 0);
+}
 function lastCardio(){
   const c = [...D.sessions].filter(s=>s.workout==="C").sort((a,b)=>a.date.localeCompare(b.date));
   return c.length ? c[c.length-1] : null;
@@ -485,6 +479,10 @@ function cardioText(s){
   return p.join(" · ") || "logged";
 }
 
+let uidCounter = 0;
+const scratchKey = () => trainDate + "|" + trainWorkout;
+function withUid(e){ return { _uid: ++uidCounter, name:e.name, sets:(e.sets||[]).map(s=>({weight:s.weight,reps:s.reps})) }; }
+
 function seedDraft(){
   const ex = sessionOn(trainDate, trainWorkout);
   if(isCardio(trainWorkout)){
@@ -492,15 +490,31 @@ function seedDraft(){
       minutes: ex && ex.cardio ? (ex.cardio.minutes||"") : "",
       miles:   ex && ex.cardio ? (ex.cardio.miles||"")   : ""
     };
+    justSaved = false;
+    return;
+  }
+  const sc = D.scratch && D.scratch[scratchKey()];
+  if(sc){
+    // unsaved in-progress entry takes precedence, so leaving the tab never loses work
+    draft = sc.map(withUid);
   } else if(ex){
-    // a logged day renders from its own saved snapshot, so editing the plan later never changes it
-    draft = (ex.exercises||[]).map(e => ({ name:e.name, weight:e.weight, sets:e.sets, reps:e.reps }));
+    // a logged day renders from its own saved snapshot
+    draft = (ex.exercises||[]).map(withUid);
   } else {
-    // no session yet: start from the current template
+    // no session yet: build from the template — one blank set per planned set
     const t = tpl(trainWorkout);
-    draft = (t ? t.exercises : []).map(x => ({ name:x.name, weight:"", sets:x.sets, reps:x.reps }));
+    draft = (t ? t.exercises : []).map(x => withUid({
+      name: x.name,
+      sets: Array.from({length: parseInt(x.sets,10)||1}, () => ({weight:"", reps:""}))
+    }));
   }
   justSaved = false;
+}
+
+function writeScratch(){
+  if(!D.scratch) D.scratch = {};
+  D.scratch[scratchKey()] = draft.map(e => ({ name:e.name, sets:e.sets.map(s=>({weight:s.weight,reps:s.reps})) }));
+  save();
 }
 
 /* ============ calendar (shared) ============ */
@@ -588,22 +602,37 @@ function viewTrain(){
 
   draft.forEach((d,i)=>{
     const prev = lastLiftBefore(d.name, trainDate);
-    h += `
-    <div class="card">
-      <input class="exname" type="text" placeholder="Exercise name" value="${esc(d.name)}"
-        oninput="setDraft(${i},'name',this.value)">
-      <div class="last" id="hint-${i}" style="margin:8px 2px 12px">${rowHintInner(d, prev)}</div>
-      <div class="row">
-        <input class="num grow" type="number" inputmode="decimal" placeholder="${prev?esc(prev.weight):"lb"}"
-          value="${esc(d.weight)}" oninput="setDraft(${i},'weight',this.value)">
-        <input class="num sr" type="number" inputmode="numeric" value="${esc(d.sets)}" oninput="setDraft(${i},'sets',this.value)">
-        <span style="color:var(--dimmer)">×</span>
-        <input class="num sr" type="number" inputmode="numeric" value="${esc(d.reps)}" oninput="setDraft(${i},'reps',this.value)">
+    const open = !!openEx[d._uid];
+    const tmpl = (tpl(trainWorkout)||{exercises:[]}).exercises.find(x=>x.name===d.name);
+    h += `<div class="card">
+      <div class="exhead" onclick="toggleEx('${d._uid}')">
+        <div class="grow" style="min-width:0">
+          <div class="exname-d">${esc(d.name||"(unnamed)")}</div>
+          <div class="last" id="hint-${i}">${rowHintInner(d, prev)}</div>
+        </div>
+        <span class="caret">${open?"▾":"▸"}</span>
+      </div>`;
+    if(open){
+      h += `<input class="exname" style="margin:10px 0" type="text" placeholder="Exercise name"
+              value="${esc(d.name)}" oninput="setExName(${i},this.value)">`;
+      if(tmpl) h += `<div class="sub" style="margin-bottom:8px">Target: ${esc(tmpl.sets)}×${esc(tmpl.reps)}</div>`;
+      h += `<div class="setshead"><span>Set</span><span>lbs</span><span>reps</span><span></span></div>`;
+      d.sets.forEach((s,j)=>{
+        h += `<div class="setrow">
+          <span class="setnum">${j+1}</span>
+          <input class="num" type="number" inputmode="decimal" placeholder="lb" value="${esc(s.weight)}" oninput="setSetVal(${i},${j},'weight',this.value)">
+          <input class="num" type="number" inputmode="numeric" placeholder="reps" value="${esc(s.reps)}" oninput="setSetVal(${i},${j},'reps',this.value)">
+          <button class="icon" onclick="delSet(${i},${j})" ${d.sets.length===1?"disabled":""}>🗑</button>
+        </div>`;
+      });
+      h += `<div class="row" style="margin-top:10px">
+        <button class="ghost" style="flex:1" onclick="addSet(${i})">+ Add set</button>
         <button class="icon" onclick="moveDraft(${i},-1)" ${i===0?"disabled":""}>↑</button>
         <button class="icon" onclick="moveDraft(${i},1)" ${i===draft.length-1?"disabled":""}>↓</button>
         <button class="icon" onclick="removeLift(${i})">🗑</button>
-      </div>
-    </div>`;
+      </div>`;
+    }
+    h += `</div>`;
   });
 
   h += `<button class="ghost" style="margin-bottom:12px" onclick="addLift()">+ Add a lift to this day</button>`;
@@ -696,23 +725,49 @@ function viewPlan(){
 function chartSVG(){
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
   if(asc.length < 2) return `<p class="sub" style="text-align:center;padding:24px 0">Log two weigh-ins and the graph appears.</p>`;
-  const vals = asc.map(w=>w.value);
-  const min = Math.min(...vals)-1, max = Math.max(...vals)+1;
+
+  // EWMA trend (denoised, continuous). alpha ~ 2/(N+1) with N≈10-day span.
+  const alpha = 0.25;
+  const trend = [];
+  asc.forEach((w,i)=>{ trend.push(i===0 ? w.value : alpha*w.value + (1-alpha)*trend[i-1]); });
+
+  // linear regression on actual elapsed days → lb/week
+  const day0 = pd(asc[0].date).getTime();
+  const xs = asc.map(w => (pd(w.date).getTime()-day0)/864e5);
+  const ys = asc.map(w => w.value);
+  const n = xs.length, sx=xs.reduce((a,b)=>a+b,0), sy=ys.reduce((a,b)=>a+b,0),
+        sxx=xs.reduce((a,b)=>a+b*b,0), sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
+  const denom = n*sxx - sx*sx;
+  const slopeWk = denom ? ((n*sxy - sx*sy)/denom)*7 : 0;
+
+  const all = [...ys, ...trend];
+  const min = Math.min(...all)-1, max = Math.max(...all)+1;
   const W=440,H=160,L=34,R=8,T=10,B=22;
   const x = i => L + (i/(asc.length-1))*(W-L-R);
   const y = v => T + (1-(v-min)/(max-min))*(H-T-B);
-  const pts = asc.map((w,i)=>`${x(i).toFixed(1)},${y(w.value).toFixed(1)}`).join(" ");
   const grid = [max,(max+min)/2,min].map(v=>
     `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-R}" y2="${y(v).toFixed(1)}" stroke="#262626"/>
      <text x="0" y="${(y(v)+4).toFixed(1)}" fill="#525252" font-size="10" font-family="monospace">${v.toFixed(1)}</text>`).join("");
-  const dots = asc.map((w,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2.5" fill="#fbbf24"/>`).join("");
-  return `<div class="card"><svg viewBox="0 0 ${W} ${H}" width="100%" height="170">
-    ${grid}
-    <polyline points="${pts}" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linejoin="round"/>
-    ${dots}
-    <text x="${L}" y="${H-4}" fill="#525252" font-size="10">${shortD(asc[0].date)}</text>
-    <text x="${W-R}" y="${H-4}" fill="#525252" font-size="10" text-anchor="end">${shortD(asc[asc.length-1].date)}</text>
-  </svg></div>`;
+  const dots = asc.map((w,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2" fill="#525252"/>`).join("");
+  const trendPts = trend.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+
+  const slopeStr = (slopeWk>0?"+":"") + slopeWk.toFixed(2) + " lb/wk";
+  const slopeColor = slopeWk < 0 ? "var(--good)" : (slopeWk > 0 ? "var(--dim)" : "var(--dimmer)");
+
+  return `<div class="card">
+    <div class="row" style="justify-content:space-between;margin-bottom:6px">
+      <span class="sub">Trend (weekly)</span>
+      <span class="mono" style="color:${slopeColor};font-size:13px">${slopeStr}</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="170">
+      ${grid}
+      ${dots}
+      <polyline points="${trendPts}" fill="none" stroke="#fbbf24" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      <text x="${L}" y="${H-4}" fill="#525252" font-size="10">${shortD(asc[0].date)}</text>
+      <text x="${W-R}" y="${H-4}" fill="#525252" font-size="10" text-anchor="end">${shortD(asc[asc.length-1].date)}</text>
+    </svg>
+    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend.</p>
+  </div>`;
 }
 function viewWeight(){
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
@@ -744,63 +799,14 @@ function viewWeight(){
   return h;
 }
 
-/* ============ photos view ============ */
-let compare = [];   // up to 2 photo ids
-
-function viewPhotos(){
-  let h = `<div class="eyebrow">Progress</div><h2>Photos</h2><div style="height:16px"></div>`;
-
-  if(compare.length === 2){
-    const [a,b] = compare.map(id => D.photos.find(p=>p.id===id));
-    h += `<div class="card">
-      <div class="row" style="justify-content:space-between;margin-bottom:10px">
-        <span class="eyebrow" style="color:var(--dimmer)">Side by side</span>
-        <button class="icon" onclick="clearCompare()">✕</button>
-      </div>
-      <div class="grid2">
-        ${[a,b].map(p=>`<div>
-          <div class="photo"><img id="cmp-${p.id}" alt="Progress photo, ${shortD(p.date)}"></div>
-          <div class="cap"><span>${shortD(p.date)}</span><span class="mono">wk ${wk(p.date)}</span></div>
-        </div>`).join("")}
-      </div>
-      <p class="sub" style="text-align:center">${Math.abs(ago(a.date)-ago(b.date))} days apart</p>
-    </div>`;
-  } else if(compare.length === 1){
-    h += `<div class="warn">Pick one more photo to compare.<button class="icon" style="float:right;color:inherit" onclick="clearCompare()">cancel</button></div>`;
-  }
-
-  h += `<div class="card">
-    <input type="date" id="pDate" value="${today()}" style="margin-bottom:12px">
-    <input type="file" accept="image/*" id="pFile" class="hide" onchange="addPhoto(event)">
-    <button class="ghost" onclick="document.getElementById('pFile').click()">📷 Add photo</button>
-  </div>`;
-
-  if(!D.photos.length) return h + `<div class="empty">No photos yet.<br>Same light, same angle, same time of day works best.</div>`;
-
-  h += `<p class="sub" style="margin-bottom:8px">Tap any two photos to compare them.</p><div class="grid2">`;
-  D.photos.forEach(p=>{
-    const idx = compare.indexOf(p.id);
-    h += `<div>
-      <div class="photo ${idx>=0?"picked":""}" onclick="toggleCompare('${p.id}')">
-        <img id="img-${p.id}" alt="Progress photo, ${shortD(p.date)}">
-        ${idx>=0 ? `<span class="badge">${idx+1}</span>` : ""}
-        <button class="del" onclick="event.stopPropagation();delPhoto('${p.id}')">🗑</button>
-      </div>
-      <div class="cap"><span>${shortD(p.date)}</span><span class="mono">wk ${wk(p.date)}</span></div>
-    </div>`;
-  });
-  return h + `</div>`;
-}
-
 /* ============ backup view ============ */
 function viewBackup(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   return `
   <div class="eyebrow">Your data</div><h2>Backup</h2><div style="height:16px"></div>
-  <div class="card stats">
+  <div class="card stats" style="grid-template-columns:repeat(2,1fr)">
     <div><div class="n">${D.sessions.length}</div><div class="l">sessions</div></div>
     <div><div class="n">${D.weights.length}</div><div class="l">weigh-ins</div></div>
-    <div><div class="n">${D.photos.length}</div><div class="l">photos</div></div>
   </div>
   <div class="${stale?"warn":"card"}" style="font-size:13px;color:${stale?"":"var(--dim)"}">
     ${D.lastBackup ? `Last export: ${shortD(D.lastBackup)} (${ago(D.lastBackup)} days ago)` : "Never exported."}
@@ -810,7 +816,7 @@ function viewBackup(){
   <button class="ghost" onclick="document.getElementById('impFile').click()">⬆ Restore from a backup file</button>
   ${note ? `<p class="ok">${esc(note)}</p>` : ""}
   <p class="sub" style="margin-top:16px;line-height:1.5">
-    Export writes one JSON file holding every template, session, weigh-in, and photo.
+    Export writes one JSON file holding every template, session, weigh-in, food, and diet day.
     In the share sheet choose Save to Files → iCloud Drive. Restoring replaces everything currently in the app.
   </p>
   <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>`;
@@ -828,6 +834,7 @@ let dietRemaining = false;        // Consumed vs Remaining toggle
 let dietCalOpen = false;
 let addingMeal = null;            // meal name we're adding a food to
 let foodFilter = "";
+let foodSearch = "";              // search in the Foods management list
 let mealCollapsed = {};           // meal name -> true when collapsed
 
 const NUT = () => D.nutrition;
@@ -1009,7 +1016,34 @@ function addPicker(meal){
 
 function dietFoods(){
   let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
-  NUT().foods.forEach(f=>{
+
+  // add-food card first
+  h += `<div class="foodcard">
+    <input type="text" id="nfName" placeholder="New food name">
+    <div class="qty" style="margin-top:8px">
+      <span class="sub">per</span>
+      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="100">
+      <select id="nfUnit"><option value="g">g</option><option value="ml">ml</option></select>
+    </div>
+    <div class="macros">
+      <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0"></div>
+      <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0"></div>
+      <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0"></div>
+      <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0"></div>
+    </div>
+    <button class="primary" style="margin-top:10px" onclick="addFood()">+ Add food</button>
+  </div>`;
+
+  // search
+  if(NUT().foods.length){
+    h += `<input type="text" id="foodSearch" placeholder="Search foods…" value="${esc(foodSearch)}" oninput="setFoodSearch(this.value)" style="margin-bottom:12px">`;
+  }
+
+  const list = NUT().foods.filter(f => !foodSearch || f.name.toLowerCase().includes(foodSearch.toLowerCase()));
+  if(NUT().foods.length && !list.length){
+    h += `<p class="sub">No foods match “${esc(foodSearch)}”.</p>`;
+  }
+  list.forEach(f=>{
     const u = f.refUnit || "g";
     h += `<div class="foodcard">
       <input type="text" value="${esc(f.name)}" placeholder="Food name" onchange="editFood('${f.id}','name',this.value)">
@@ -1030,21 +1064,6 @@ function dietFoods(){
       <button class="ghost" style="color:var(--bad);margin-top:8px" onclick="delFood('${f.id}')">Delete ${esc(f.name)}</button>
     </div>`;
   });
-  h += `<div class="foodcard">
-    <input type="text" id="nfName" placeholder="New food name">
-    <div class="qty" style="margin-top:8px">
-      <span class="sub">per</span>
-      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="100">
-      <select id="nfUnit"><option value="g">g</option><option value="ml">ml</option></select>
-    </div>
-    <div class="macros">
-      <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0"></div>
-      <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0"></div>
-      <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0"></div>
-      <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0"></div>
-    </div>
-    <button class="primary" style="margin-top:10px" onclick="addFood()">+ Add food</button>
-  </div>`;
   return h;
 }
 
@@ -1089,6 +1108,7 @@ function copyYesterdayMeal(meal){
 }
 function cancelAdd(){ addingMeal=null; render(); }
 function setFoodFilter(v){ foodFilter=v; render(); }
+function setFoodSearch(v){ foodSearch=v; render(); }
 
 function addEntry(meal, foodId){
   const food = NUT().foods.find(f=>f.id===foodId);
@@ -1143,45 +1163,58 @@ function setTarget(k,v){ NUT().targets[k] = parseFloat(v)||0; save(); }
 function shiftDay(n){ const d = pd(trainDate); d.setDate(d.getDate()+n); trainDate = iso(d); calMonth = pd(trainDate); seedDraft(); render(); }
 function pickWorkout(w){ trainWorkout = w; seedDraft(); render(); }
 function jumpTo(date,w){ trainDate=date; trainWorkout=w; calMonth=pd(date); calOpen=false; seedDraft(); render(); }
-// shared hint HTML for a train row: last stats + volume, colored vs this session
+// shared hint HTML for a train exercise: last-session volume, colored vs this session
 function rowHintInner(d, prev){
   if(!prev) return "first time";
-  const n = x => parseFloat(x) || 0;
-  const up = d.weight !== "" && n(d.weight) > n(prev.weight);
-  const lastVol = n(prev.weight)*n(prev.sets)*n(prev.reps);
-  const curVol = (d.weight !== "") ? n(d.weight)*n(d.sets)*n(d.reps) : null;
-  let s = `${up?"▲ ":""}last: ${esc(prev.weight)} lb · ${esc(prev.sets)}×${esc(prev.reps)} · vol ${round(lastVol)}`;
-  if(curVol !== null){
+  const lastVol = exVolume(prev);
+  const curVol = exVolume(d);
+  let s = `last: ${(prev.sets||[]).length} sets · vol ${round(lastVol)}`;
+  if(curVol > 0){
     const cls = curVol > lastVol ? "up" : (curVol < lastVol ? "down" : "");
     const arw = curVol > lastVol ? "▲" : (curVol < lastVol ? "▼" : "•");
     s += ` <span class="${cls}">→ ${round(curVol)} ${arw}</span>`;
   }
   return s;
 }
-function setDraft(i,f,v){
-  if(!draft[i]) return;
-  draft[i][f] = v; justSaved = false;
+function refreshHint(i){
   const el = document.getElementById("hint-"+i);
   if(el) el.innerHTML = rowHintInner(draft[i], lastLiftBefore(draft[i].name, trainDate));
 }
+function toggleEx(uid){ openEx[uid] = !openEx[uid]; render(); }
+function setSetVal(i,j,f,v){
+  if(!draft[i] || !draft[i].sets[j]) return;
+  draft[i].sets[j][f] = v; justSaved = false;
+  refreshHint(i); writeScratch();
+}
+function setExName(i,v){
+  if(!draft[i]) return;
+  draft[i].name = v; justSaved = false;
+  refreshHint(i); writeScratch();
+}
+function addSet(i){ draft[i].sets.push({weight:"",reps:""}); justSaved=false; writeScratch(); render(); }
+function delSet(i,j){ if(draft[i].sets.length>1){ draft[i].sets.splice(j,1); justSaved=false; writeScratch(); render(); } }
 function setCardio(f,v){ cardioDraft[f]=v; justSaved=false; }
-function addLift(){ draft.push({ name:"", weight:"", sets:"3", reps:"10", custom:true }); justSaved=false; render(); }
-function removeLift(i){ draft.splice(i,1); justSaved=false; render(); }
+function addLift(){
+  const row = withUid({ name:"", sets:[{weight:"",reps:""},{weight:"",reps:""},{weight:"",reps:""}] });
+  draft.push(row); openEx[row._uid] = true; justSaved=false; writeScratch(); render();
+}
+function removeLift(i){ draft.splice(i,1); justSaved=false; writeScratch(); render(); }
 function moveDraft(i,dir){
   const j = i + dir;
   if(j < 0 || j >= draft.length) return;
   [draft[i], draft[j]] = [draft[j], draft[i]];
-  justSaved = false; render();
+  justSaved = false; writeScratch(); render();
 }
 
 function saveSession(){
   const exercises = draft
-    .filter(r => (r.name||"").trim() !== "" && r.weight !== "")
-    .map(r => ({ name:r.name.trim(), weight:r.weight, sets:r.sets, reps:r.reps }));
-  if(!exercises.length){ err="Enter at least one lift with a weight before saving."; render(); return; }
+    .map(r => ({ name:(r.name||"").trim(), sets: r.sets.filter(s => s.weight!=="" || s.reps!=="").map(s=>({weight:s.weight,reps:s.reps})) }))
+    .filter(r => r.name !== "" && r.sets.length);
+  if(!exercises.length){ err="Enter at least one set before saving."; render(); return; }
   D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout===trainWorkout)),
                 { date:trainDate, workout:trainWorkout, exercises }]
                 .sort((a,b)=>b.date.localeCompare(a.date));
+  if(D.scratch) delete D.scratch[scratchKey()];   // committed — clear the unsaved copy
   save(); justSaved=true; render();
 }
 
@@ -1260,50 +1293,10 @@ function addWeight(){
 }
 function delWeight(date){ D.weights = D.weights.filter(w=>w.date!==date); save(); render(); }
 
-async function addPhoto(e){
-  const file = e.target.files[0];
-  const date = document.getElementById("pDate").value || today();
-  if(!file) return;
-  try{
-    const url = await compress(file);
-    const id = String(Date.now());
-    await IDB.put(id,url);
-    D.photos = [{id,date}, ...D.photos].sort((a,b)=>b.date.localeCompare(a.date));
-    save(); render();
-  }catch(ex){ err = ex.message || "That photo didn't save."; render(); }
-  e.target.value = "";
-}
-async function delPhoto(id){
-  if(!confirm("Delete this photo?")) return;
-  D.photos = D.photos.filter(p=>p.id!==id);
-  compare = compare.filter(c=>c!==id);
-  save(); render();
-  try{ await IDB.del(id); }catch(e){}
-}
-function toggleCompare(id){
-  const i = compare.indexOf(id);
-  if(i >= 0) compare.splice(i,1);
-  else if(compare.length < 2) compare.push(id);
-  else compare = [compare[1], id];
-  render();
-}
-function clearCompare(){ compare = []; render(); }
-
-async function paintPhotos(){
-  const targets = [...D.photos.map(p=>["img-"+p.id, p.id]), ...compare.map(id=>["cmp-"+id, id])];
-  for(const [elId, pid] of targets){
-    const el = document.getElementById(elId);
-    if(!el || el.src) continue;
-    try{ const url = await IDB.get(pid); if(url) el.src = url; }catch(e){}
-  }
-}
-
 async function exportAll(){
   note = "";
   try{
-    const photos = {};
-    for(const p of D.photos){ const u = await IDB.get(p.id); if(u) photos[p.id] = u; }
-    const blob = new Blob([JSON.stringify({app:"gymlog",version:SCHEMA,exported:today(),data:D,photos})],{type:"application/json"});
+    const blob = new Blob([JSON.stringify({app:"gymlog",version:SCHEMA,exported:today(),data:D})],{type:"application/json"});
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `gym-backup-${today()}.json`;
@@ -1329,7 +1322,6 @@ async function importAll(e){
     }
 
     const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
-    for(const [id,url] of Object.entries(parsed.photos || {})) await IDB.put(id,url);
     D = upgraded;
     save(); ensureSelection(); seedDraft();
     note = v < SCHEMA
@@ -1351,18 +1343,17 @@ function render(){
     focus = { id:act.id, sel };
   }
 
-  const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, photos:viewPhotos, backup:viewBackup };
+  const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, backup:viewBackup };
   document.getElementById("app").innerHTML =
     (err ? `<div class="err">${esc(err)}</div>` : "") + views[tab]();
   document.getElementById("nav").innerHTML =
-    [["train","Train"],["plan","Plan"],["diet","Diet"],["weight","Weight"],["photos","Photos"],["backup","Backup"]]
+    [["train","Train"],["plan","Plan"],["diet","Diet"],["weight","Weight"],["backup","Backup"]]
     .map(([id,label]) => `<button class="${tab===id?"on":""}" onclick="go('${id}')">${label}</button>`).join("");
 
   if(focus){
     const el = document.getElementById(focus.id);
     if(el){ el.focus(); if(focus.sel){ try { el.setSelectionRange(focus.sel.s, focus.sel.e); } catch(_) {} } }
   }
-  if(tab === "photos") paintPhotos();
   TIMER.sync();
   TIMER.draw();
 }
