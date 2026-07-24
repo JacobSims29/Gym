@@ -207,6 +207,12 @@
 <script>
 /* ============ constants ============ */
 const KEY = "gymlog.v1";
+const AI_KEY_LS = "gymlog.ai.key";      // stored separately so it never lands in a backup
+const AI_MODEL_LS = "gymlog.ai.model";
+const AI_MODELS = { haiku: "claude-haiku-4-5-20251001", sonnet: "claude-sonnet-5" };
+const AI_LABEL = { haiku: "Haiku 4.5", sonnet: "Sonnet 5" };
+let aiKey = "";
+let aiModel = "haiku";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -839,6 +845,13 @@ let dietCalOpen = false;
 let addingMeal = null;            // meal name we're adding a food to
 let foodFilter = "";
 let foodSearch = "";              // search in the Foods management list
+// AI meal scan state (all transient, none saved to D)
+let aiSettingsOpen = false;
+let scanImg = null;               // {data, mediaType}
+let scanDesc = "";
+let scanBusy = false;
+let scanMsg = "";
+let scanResult = null;            // prefills the add-food form after a scan
 let mealCollapsed = {};           // meal name -> true when collapsed
 
 const NUT = () => D.nutrition;
@@ -1018,22 +1031,67 @@ function addPicker(meal){
   return h;
 }
 
+function aiScanCard(){
+  let h = `<div class="foodcard">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <b>📷 Scan a meal <span class="sub" style="font-weight:400">(AI estimate)</span></b>
+      <button class="icon" onclick="toggleAiSettings()">⚙</button>
+    </div>`;
+
+  if(aiSettingsOpen || !aiKey){
+    h += `<p class="sub" style="margin:8px 0">Uses your own Anthropic API key. It's stored only on this device and is never included in backups.</p>
+      <input type="password" id="aiKeyInput" placeholder="Anthropic API key (sk-ant-…)" value="${esc(aiKey)}" style="margin-bottom:8px">
+      <div class="qty" style="margin:0 0 10px">
+        <span class="sub">model</span>
+        <select id="aiModelSelect">
+          <option value="haiku" ${aiModel==="haiku"?"selected":""}>Haiku 4.5 (cheapest)</option>
+          <option value="sonnet" ${aiModel==="sonnet"?"selected":""}>Sonnet 5 (more accurate)</option>
+        </select>
+      </div>
+      <div class="row">
+        <button class="primary grow" onclick="saveAiKey()">Save</button>
+        ${aiKey ? `<button class="ghost" onclick="clearAiKey()">Remove key</button>` : ""}
+      </div>`;
+    return h + `</div>`;
+  }
+
+  // key present: scan controls
+  h += `<div class="sub" style="margin:6px 0 10px">Model: ${AI_LABEL[aiModel]||aiModel} · roughly a fraction of a cent per scan</div>`;
+  h += `<input type="file" accept="image/*" id="scanFile" class="hide" onchange="onScanFile(event)">`;
+  if(!scanImg){
+    h += `<button class="ghost" onclick="document.getElementById('scanFile').click()">${scanBusy?"…":"Choose or take a photo"}</button>`;
+  } else {
+    h += `<img src="data:${scanImg.mediaType};base64,${scanImg.data}" alt="meal" style="width:100%;max-height:200px;object-fit:cover;border-radius:8px;margin-bottom:8px">
+      <input type="text" id="scanDesc" placeholder="Short description, e.g. chicken bowl ~2 cups" value="${esc(scanDesc)}" oninput="setScanDesc(this.value)" style="margin-bottom:8px">
+      <div class="row">
+        <button class="primary grow" ${scanBusy?"disabled":""} onclick="runScan()">${scanBusy?"Working…":"Estimate nutrition"}</button>
+        <button class="ghost" onclick="document.getElementById('scanFile').click()">Retake</button>
+      </div>`;
+  }
+  if(scanMsg) h += `<p class="sub" style="margin-top:8px;color:${scanMsg.startsWith("Scan failed")?"var(--bad)":"var(--good)"}">${esc(scanMsg)}</p>`;
+  return h + `</div>`;
+}
+
 function dietFoods(){
   let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
 
-  // add-food card first
-  h += `<div class="foodcard">
-    <input type="text" id="nfName" placeholder="New food name">
+  h += aiScanCard();
+
+  // add-food card (prefilled after a scan)
+  const sr = scanResult || {};
+  h += `<div class="foodcard" ${scanResult?'style="border-color:var(--accent)"':''}>
+    ${scanResult?'<div class="sub" style="margin-bottom:8px;color:var(--accent)">From your photo — an estimate. Review, then Add food.</div>':''}
+    <input type="text" id="nfName" placeholder="New food name" value="${esc(sr.name||"")}">
     <div class="qty" style="margin-top:8px">
       <span class="sub">per</span>
-      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="100">
+      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="${sr.grams!=null?esc(sr.grams):"100"}">
       <select id="nfUnit"><option value="g">g</option><option value="ml">ml</option></select>
     </div>
     <div class="macros">
-      <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0"></div>
-      <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0"></div>
-      <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0"></div>
-      <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0"></div>
+      <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0" value="${sr.cal!=null?esc(sr.cal):""}"></div>
+      <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0" value="${sr.protein!=null?esc(sr.protein):""}"></div>
+      <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0" value="${sr.carb!=null?esc(sr.carb):""}"></div>
+      <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0" value="${sr.fat!=null?esc(sr.fat):""}"></div>
     </div>
     <button class="primary" style="margin-top:10px" onclick="addFood()">+ Add food</button>
   </div>`;
@@ -1114,6 +1172,126 @@ function cancelAdd(){ addingMeal=null; render(); }
 function setFoodFilter(v){ foodFilter=v; render(); }
 function setFoodSearch(v){ foodSearch=v; render(); }
 
+/* ============ AI meal scan (bring your own key) ============ */
+function loadAiSettings(){
+  try{
+    aiKey = localStorage.getItem(AI_KEY_LS) || "";
+    aiModel = localStorage.getItem(AI_MODEL_LS) || "haiku";
+  }catch(e){}
+}
+function saveAiKey(){
+  const k = (document.getElementById("aiKeyInput").value || "").trim();
+  const m = document.getElementById("aiModelSelect").value;
+  aiKey = k; aiModel = m;
+  try{ localStorage.setItem(AI_KEY_LS, k); localStorage.setItem(AI_MODEL_LS, m); }catch(e){}
+  aiSettingsOpen = false; scanMsg = ""; render();
+}
+function clearAiKey(){
+  aiKey = "";
+  try{ localStorage.removeItem(AI_KEY_LS); }catch(e){}
+  render();
+}
+function setAiModel(m){
+  aiModel = m;
+  try{ localStorage.setItem(AI_MODEL_LS, m); }catch(e){}
+  render();
+}
+function toggleAiSettings(){ aiSettingsOpen = !aiSettingsOpen; render(); }
+function setScanDesc(v){ scanDesc = v; }
+
+function imgToBase64(file, maxDim){
+  return new Promise((res,rej)=>{
+    const fr = new FileReader();
+    fr.onerror = () => rej(new Error("Couldn't read that image."));
+    fr.onload = e => {
+      const img = new Image();
+      img.onerror = () => rej(new Error("That file isn't an image."));
+      img.onload = () => {
+        const s = Math.min(1, maxDim/Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
+        c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+        const url = c.toDataURL("image/jpeg", 0.8);
+        res({ data: url.split(",")[1], mediaType: "image/jpeg" });
+      };
+      img.src = e.target.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+async function onScanFile(e){
+  const file = e.target.files[0];
+  e.target.value = "";
+  if(!file) return;
+  scanBusy = true; scanMsg = "Reading photo…"; render();
+  try{ scanImg = await imgToBase64(file, 1024); scanMsg = ""; }
+  catch(ex){ scanMsg = ex.message || "Couldn't read that photo."; }
+  scanBusy = false; render();
+}
+
+async function callVision(img, desc){
+  const model = AI_MODELS[aiModel] || AI_MODELS.haiku;
+  const prompt =
+`You estimate nutrition from a meal photo plus a short user description.
+Respond with ONLY a JSON object — no prose, no markdown fences — in exactly this shape:
+{"name": string, "grams": number, "calories": number, "protein_g": number, "carb_g": number, "fat_g": number, "note": string}
+"grams" is your best estimate of the total edible weight shown. The macro numbers are totals for that whole portion. Keep "note" under 12 words. If unsure, still give your best single estimate.
+
+User description: ${desc || "(none provided)"}`;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": aiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 400,
+      messages: [{ role:"user", content: [
+        { type:"image", source:{ type:"base64", media_type: img.mediaType, data: img.data } },
+        { type:"text", text: prompt }
+      ]}]
+    })
+  });
+  if(!res.ok){
+    let msg = "HTTP " + res.status;
+    try{ const j = await res.json(); if(j.error && j.error.message) msg = j.error.message; }catch(_){}
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  const text = (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("").trim();
+  const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+  return {
+    name: String(parsed.name || "Scanned meal"),
+    grams: Math.max(1, Math.round(Number(parsed.grams) || 100)),
+    cal: Math.round(Number(parsed.calories) || 0),
+    protein: Math.round(Number(parsed.protein_g) || 0),
+    carb: Math.round(Number(parsed.carb_g) || 0),
+    fat: Math.round(Number(parsed.fat_g) || 0),
+    note: String(parsed.note || "")
+  };
+}
+
+async function runScan(){
+  if(!aiKey){ scanMsg = "Enter your API key first (⚙)."; render(); return; }
+  if(!scanImg){ scanMsg = "Add a photo first."; render(); return; }
+  scanBusy = true; scanMsg = "Analyzing with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
+  try{
+    const r = await callVision(scanImg, scanDesc);
+    scanResult = r;
+    scanImg = null; scanDesc = ""; scanBusy = false;
+    scanMsg = r.note ? ("Estimate ready — " + r.note) : "Estimate ready — review and Add food below.";
+    render();
+  }catch(ex){
+    scanBusy = false;
+    scanMsg = "Scan failed: " + (ex.message || "try again") + ". This is an estimate feature — check your key and connection.";
+    render();
+  }
+}
+
 function addEntry(meal, foodId){
   const food = NUT().foods.find(f=>f.id===foodId);
   if(!food) return;
@@ -1146,6 +1324,7 @@ function addFood(){
     cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fat:num("nfF")
   });
   NUT().foods.sort((a,b)=>a.name.localeCompare(b.name));
+  scanResult = null; scanMsg = "";
   save(); render();
 }
 function editFood(id,f,v){
@@ -1386,6 +1565,7 @@ document.addEventListener("touchend", e=>{
 }, {passive:true});
 
 load();
+loadAiSettings();
 ensureSelection();
 seedDraft();
 render();
