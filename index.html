@@ -731,17 +731,21 @@ function chartSVG(){
   const trend = [];
   asc.forEach((w,i)=>{ trend.push(i===0 ? w.value : alpha*w.value + (1-alpha)*trend[i-1]); });
 
-  // linear regression on actual elapsed days → lb/week
-  const day0 = pd(asc[0].date).getTime();
-  const xs = asc.map(w => (pd(w.date).getTime()-day0)/864e5);
-  const ys = asc.map(w => w.value);
+  // lb/week from a linear fit over the trailing 4 weeks (falls back to all data if <2 points in window)
+  const latest = pd(asc[asc.length-1].date).getTime();
+  const win = asc.filter(w => (latest - pd(w.date).getTime())/864e5 <= 28);
+  const reg = win.length >= 2 ? win : asc;
+  const isWindow = win.length >= 2;
+  const rday0 = pd(reg[0].date).getTime();
+  const xs = reg.map(w => (pd(w.date).getTime()-rday0)/864e5);
+  const ys = reg.map(w => w.value);
   const n = xs.length, sx=xs.reduce((a,b)=>a+b,0), sy=ys.reduce((a,b)=>a+b,0),
         sxx=xs.reduce((a,b)=>a+b*b,0), sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
   const denom = n*sxx - sx*sx;
   const slopeWk = denom ? ((n*sxy - sx*sy)/denom)*7 : 0;
 
-  const all = [...ys, ...trend];
-  const min = Math.min(...all)-1, max = Math.max(...all)+1;
+  const allV = [...asc.map(w=>w.value), ...trend];
+  const min = Math.min(...allV)-1, max = Math.max(...allV)+1;
   const W=440,H=160,L=34,R=8,T=10,B=22;
   const x = i => L + (i/(asc.length-1))*(W-L-R);
   const y = v => T + (1-(v-min)/(max-min))*(H-T-B);
@@ -756,7 +760,7 @@ function chartSVG(){
 
   return `<div class="card">
     <div class="row" style="justify-content:space-between;margin-bottom:6px">
-      <span class="sub">Trend (weekly)</span>
+      <span class="sub">${isWindow ? "4-wk rate" : "rate (all data)"}</span>
       <span class="mono" style="color:${slopeColor};font-size:13px">${slopeStr}</span>
     </div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="170">
@@ -1163,12 +1167,19 @@ function setTarget(k,v){ NUT().targets[k] = parseFloat(v)||0; save(); }
 function shiftDay(n){ const d = pd(trainDate); d.setDate(d.getDate()+n); trainDate = iso(d); calMonth = pd(trainDate); seedDraft(); render(); }
 function pickWorkout(w){ trainWorkout = w; seedDraft(); render(); }
 function jumpTo(date,w){ trainDate=date; trainWorkout=w; calMonth=pd(date); calOpen=false; seedDraft(); render(); }
-// shared hint HTML for a train exercise: last-session volume, colored vs this session
+// shared hint HTML for a train exercise: last-session summary, colored volume vs this session
+function meanOf(sets, field){
+  const nums = (sets||[]).map(s => parseFloat(s[field]) || 0);
+  return nums.length ? nums.reduce((a,b)=>a+b,0)/nums.length : 0;
+}
+const fmtNum = n => Number.isInteger(n) ? String(n) : n.toFixed(1);
 function rowHintInner(d, prev){
   if(!prev) return "first time";
   const lastVol = exVolume(prev);
   const curVol = exVolume(d);
-  let s = `last: ${(prev.sets||[]).length} sets · vol ${round(lastVol)}`;
+  const mw = fmtNum(Math.round(meanOf(prev.sets,"weight")*10)/10);   // mean weight (1 dp)
+  const mr = Math.round(meanOf(prev.sets,"reps"));                    // mean reps
+  let s = `last: ${mw} lb · ${(prev.sets||[]).length}×${mr} · vol ${round(lastVol)}`;
   if(curVol > 0){
     const cls = curVol > lastVol ? "up" : (curVol < lastVol ? "down" : "");
     const arw = curVol > lastVol ? "▲" : (curVol < lastVol ? "▼" : "•");
