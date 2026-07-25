@@ -1318,7 +1318,7 @@ Deliver, in clear structured sections with short headers:
 2. What's working / what's not.
 3. Recommendations — be concrete and numeric: suggest specific calorie and macronutrient target ranges (give numbers), training adjustments (volume, exercise selection, progression, frequency), and recovery. Tie advice to their stated goals.
 
-Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct, avoid filler, and keep it readable on a phone.`;
+Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct and avoid filler. Keep the whole response concise and readable on a phone — aim for roughly 400–600 words, and always finish every section rather than cutting off.`;
 
 function linRateWk(pts){
   if(pts.length < 2) return null;
@@ -1437,7 +1437,7 @@ async function runAnalysis(){
   coachBusy = true; coachMsg = "Analyzing your history with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
   try{
     const messages = [{ role:"user", content: buildCoachContext() + "\n\nAs my coach, give me a full progress analysis and evidence-based, sustainable recommendations for a healthy adult pursuing general fitness and body-composition goals." }];
-    const reply = await callCoach(messages, 2500);
+    const reply = await callCoach(messages, 25000);
     if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     messages.push({ role:"assistant", content: reply });
     D.coach.current = { date: today(), messages };
@@ -1462,7 +1462,7 @@ async function sendFollowup(){
   coachBusy = true; coachMsg = "Thinking…"; render();
   D.coach.current.messages.push({ role:"user", content: text });
   try{
-    const reply = await callCoach(D.coach.current.messages, 1500);
+    const reply = await callCoach(D.coach.current.messages, 25000);
     if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     D.coach.current.messages.push({ role:"assistant", content: reply });
     coachBusy = false; coachMsg = "";
