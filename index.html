@@ -1425,9 +1425,7 @@ function saveGoals(v){ D.coach.goals = v; save(); }
 
 async function runAnalysis(){
   if(!aiKey){ coachMsg = "Set your API key on the Diet → Foods tab (⚙) first."; render(); return; }
-  const daysLeft = D.coach.lastRun ? 14 - ago(D.coach.lastRun) : 0;
-  if(daysLeft > 0){ coachMsg = `Next analysis available in ${daysLeft} day${daysLeft===1?"":"s"}.`; render(); return; }
-  coachBusy = true; coachMsg = "Analyzing your last two weeks with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
+  coachBusy = true; coachMsg = "Analyzing your history with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
   try{
     const messages = [{ role:"user", content: buildCoachContext() + "\n\nGive me a full progress analysis and recommendations." }];
     const reply = await callCoach(messages, 1500);
@@ -1487,17 +1485,15 @@ function viewSummary(){
   </div>`;
 
   const hasAnalysis = c.current && c.current.messages.some(m => m.role==="assistant" && (m.content||"").trim());
-  const locked = hasAnalysis && c.lastRun && ago(c.lastRun) < 14;
-  const daysLeft = c.lastRun ? Math.max(0, 14 - ago(c.lastRun)) : 0;
+  const locked = false;   // two-week lock disabled for testing
   h += `<div class="card">`;
   if(!aiKey){
     h += `<p class="sub">Set your Anthropic API key on the <b>Diet → Foods</b> tab (⚙ on the Scan card) to enable AI analysis.</p>`;
   } else if(locked){
-    h += `<button class="ghost" disabled>Next analysis in ${daysLeft} day${daysLeft===1?"":"s"}</button>
-      <p class="sub" style="margin-top:8px">A fresh analysis unlocks every two weeks. You can still ask follow-ups below.</p>`;
+    h += `<button class="ghost" disabled>Locked</button>`;
   } else {
     h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(hasAnalysis?"Run a new analysis":"Get AI analysis")}</button>
-      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history; runs once every two weeks.</p>`;
+      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history.</p>`;
   }
   if(coachMsg) h += `<p class="sub" style="margin-top:8px;color:${coachMsg.includes("failed")?"var(--bad)":"var(--dim)"}">${esc(coachMsg)}</p>`;
   h += `</div>`;
