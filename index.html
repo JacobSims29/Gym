@@ -37,6 +37,12 @@
     color:var(--text);padding:12px;font-size:16px;font-family:inherit;width:100%;
   }
   input:focus{outline:none;border-color:var(--accent)}
+  .ta{width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:6px;color:var(--text);
+    padding:10px;font-size:16px;font-family:inherit;resize:vertical}
+  .ta:focus{outline:none;border-color:var(--accent)}
+  .coachmsg{border-radius:10px;padding:14px;margin-bottom:10px;font-size:14px;line-height:1.5}
+  .coachmsg.ca{background:var(--card);border:1px solid var(--line)}
+  .coachmsg.cu{background:#1e293b;color:#dbeafe;margin-left:24px}
   input.num{font-family:ui-monospace,Menlo,monospace;text-align:center;font-variant-numeric:tabular-nums}
   input.sr{width:52px;padding:12px 4px;color:var(--dim);border-color:var(--line)}
 
@@ -53,8 +59,8 @@
   .seg button.on.cardio{border-color:var(--cardio)}
 
   .nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
-    display:grid;grid-template-columns:repeat(5,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
-  .nav button{background:none;border-radius:0;font-size:11px;font-weight:600;color:var(--dimmer);
+    display:grid;grid-template-columns:repeat(6,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
+  .nav button{background:none;border-radius:0;font-size:10px;font-weight:600;color:var(--dimmer);
     padding:14px 0;border-top:2px solid transparent}
   .nav button.on{color:var(--accent);border-top-color:var(--accent)}
 
@@ -216,13 +222,14 @@ let aiModel = "haiku";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 8;   // bump whenever the saved data shape changes, and add a migration below
+const SCHEMA = 9;   // bump whenever the saved data shape changes, and add a migration below
 const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
 const EMPTY = {
   schema:SCHEMA,
   templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}],
   sessions:[], weights:[], photos:[], lastBackup:null,
   scratch:{},
+  coach:{ goals:"", lastRun:null, current:null },
   nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{} }
 };
 
@@ -314,6 +321,11 @@ const MIGRATIONS = {
       }
     });
     if(!d.scratch) d.scratch = {};
+    return d;
+  },
+  // 8 → 9: AI coach (goals, biweekly analysis, follow-ups)
+  8(d){
+    if(!d.coach) d.coach = { goals:"", lastRun:null, current:null };
     return d;
   }
 };
@@ -1292,6 +1304,202 @@ async function runScan(){
   }
 }
 
+/* ============ AI coach (Summary tab) ============ */
+let coachBusy = false;
+let coachMsg = "";
+
+const COACH_SYSTEM =
+`You are a single trusted expert combining three roles: a licensed physical therapist, a registered dietitian, and a science-based strength & conditioning coach. You give evidence-based, practical, specific guidance.
+
+You will receive a compiled summary of the user's last two weeks: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals.
+
+Deliver, in clear structured sections with short headers:
+1. Progress — where they are versus their goals, reading the bodyweight trend and adherence honestly.
+2. What's working / what's not.
+3. Recommendations — be concrete and numeric: suggest specific calorie and macronutrient target ranges (give numbers), training adjustments (volume, exercise selection, progression, frequency), and recovery. Tie advice to their stated goals.
+
+Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct, avoid filler, and keep it readable on a phone.`;
+
+function weeklyRate(asc){
+  if(asc.length < 2) return null;
+  const latest = pd(asc[asc.length-1].date).getTime();
+  const win = asc.filter(w => (latest - pd(w.date).getTime())/864e5 <= 28);
+  const reg = win.length >= 2 ? win : asc;
+  const r0 = pd(reg[0].date).getTime();
+  const xs = reg.map(w => (pd(w.date).getTime()-r0)/864e5), ys = reg.map(w => w.value);
+  const n=xs.length, sx=xs.reduce((a,b)=>a+b,0), sy=ys.reduce((a,b)=>a+b,0),
+        sxx=xs.reduce((a,b)=>a+b*b,0), sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
+  const dd = n*sxx - sx*sx;
+  return dd ? ((n*sxy - sx*sy)/dd)*7 : 0;
+}
+
+function buildCoachContext(){
+  const c = D.coach, lines = [];
+  const today0 = pd(today()).getTime();
+
+  lines.push("=== USER GOALS ===");
+  lines.push(c.goals && c.goals.trim() ? c.goals.trim() : "(none written)");
+
+  const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
+  lines.push("\n=== BODYWEIGHT ===");
+  if(asc.length){
+    lines.push(`Current: ${asc[asc.length-1].value} lb (${asc[asc.length-1].date})`);
+    const r = weeklyRate(asc);
+    if(r!=null) lines.push(`4-week rate: ${r.toFixed(2)} lb/week`);
+    lines.push(`Recent weigh-ins: ${asc.slice(-10).map(w=>w.date+":"+w.value).join(", ")}`);
+  } else lines.push("No weigh-ins logged.");
+
+  const t = NUT().targets;
+  lines.push("\n=== NUTRITION TARGETS ===");
+  lines.push(`Calories ${t.calMin}-${t.calMax} | Protein ${t.pMin}-${t.pMax}g | Carbs ${t.cMin}-${t.cMax}g | Fat ${t.fMin}-${t.fMax}g`);
+
+  const days = [];
+  for(let i=0;i<14;i++){
+    const ds = iso(new Date(today0 - i*864e5));
+    if(dayEntries(ds).length) days.push(dayTotals(ds));
+  }
+  lines.push("\n=== NUTRITION, LAST 14 DAYS (logged days only) ===");
+  if(days.length){
+    const s = days.reduce((a,d)=>({cal:a.cal+d.cal,p:a.p+d.protein,c:a.c+d.carb,f:a.f+d.fat}),{cal:0,p:0,c:0,f:0});
+    const n = days.length;
+    lines.push(`Days logged: ${n}/14`);
+    lines.push(`Average per logged day: ${round(s.cal/n)} cal, ${round(s.p/n)}g protein, ${round(s.c/n)}g carb, ${round(s.f/n)}g fat`);
+  } else lines.push("No nutrition logged in the last 14 days.");
+
+  lines.push("\n=== TRAINING, LAST 14 DAYS ===");
+  const recent = D.sessions.filter(s => (today0 - pd(s.date).getTime())/864e5 <= 14).sort((a,b)=>a.date.localeCompare(b.date));
+  if(recent.length){
+    recent.forEach(s=>{
+      if(s.workout==="C") lines.push(`${s.date} Cardio: ${cardioText(s)}`);
+      else {
+        const exs = (s.exercises||[]).map(e=>`${e.name} ${(e.sets||[]).length} sets (vol ${round(exVolume(e))})`).join("; ");
+        lines.push(`${s.date} ${wLabel(s.workout)}: ${exs}`);
+      }
+    });
+  } else lines.push("No training sessions in the last 14 days.");
+
+  return lines.join("\n");
+}
+
+async function callCoach(messages, maxTokens){
+  const model = AI_MODELS[aiModel] || AI_MODELS.haiku;
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{
+      "content-type":"application/json",
+      "x-api-key": aiKey,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"
+    },
+    body: JSON.stringify({ model, max_tokens: maxTokens||1400, system: COACH_SYSTEM, messages })
+  });
+  if(!res.ok){
+    let msg = "HTTP " + res.status;
+    try{ const j = await res.json(); if(j.error && j.error.message) msg = j.error.message; }catch(_){}
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("").trim();
+}
+
+function saveGoals(v){ D.coach.goals = v; save(); }
+
+async function runAnalysis(){
+  if(!aiKey){ coachMsg = "Set your API key on the Diet → Foods tab (⚙) first."; render(); return; }
+  const daysLeft = D.coach.lastRun ? 14 - ago(D.coach.lastRun) : 0;
+  if(daysLeft > 0){ coachMsg = `Next analysis available in ${daysLeft} day${daysLeft===1?"":"s"}.`; render(); return; }
+  coachBusy = true; coachMsg = "Analyzing your last two weeks with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
+  try{
+    const messages = [{ role:"user", content: buildCoachContext() + "\n\nGive me a full progress analysis and recommendations." }];
+    const reply = await callCoach(messages, 1500);
+    messages.push({ role:"assistant", content: reply });
+    D.coach.current = { date: today(), messages };
+    D.coach.lastRun = today();
+    coachBusy = false; coachMsg = "";
+    save(); render();
+  }catch(ex){
+    coachBusy = false; coachMsg = "Analysis failed: " + (ex.message || "try again") + " (check your key and connection).";
+    render();
+  }
+}
+
+function followupsUsed(){
+  return D.coach.current ? D.coach.current.messages.filter((m,i)=> i>0 && m.role==="user").length : 0;
+}
+
+async function sendFollowup(){
+  if(!D.coach.current) return;
+  if(followupsUsed() >= 5){ coachMsg = "You've used all 5 follow-ups for this analysis."; render(); return; }
+  const text = (document.getElementById("followupInput").value || "").trim();
+  if(!text){ return; }
+  coachBusy = true; coachMsg = "Thinking…"; render();
+  D.coach.current.messages.push({ role:"user", content: text });
+  try{
+    const reply = await callCoach(D.coach.current.messages, 1000);
+    D.coach.current.messages.push({ role:"assistant", content: reply });
+    coachBusy = false; coachMsg = "";
+    save(); render();
+  }catch(ex){
+    D.coach.current.messages.pop();   // undo optimistic push so they can retry
+    coachBusy = false; coachMsg = "Follow-up failed: " + (ex.message || "try again");
+    render();
+  }
+}
+
+// tiny, safe markdown → HTML (escape first, then limited formatting)
+function mdToHtml(s){
+  let t = esc(s);
+  t = t.replace(/^\s*#{1,4}\s*(.+)$/gm, '<b>$1</b>');
+  t = t.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  t = t.replace(/^\s*[-*•]\s+(.+)$/gm, '• $1');
+  t = t.replace(/\n/g, '<br>');
+  return t;
+}
+
+function viewSummary(){
+  const c = D.coach;
+  let h = `<div class="eyebrow">Coach</div><h2>Summary</h2><div style="height:14px"></div>`;
+
+  h += `<div class="card">
+    <label class="sub" style="display:block;margin-bottom:6px">Your goals</label>
+    <textarea id="goalsInput" class="ta" rows="4" placeholder="e.g. drop to ~175 lb while keeping strength; hit 180g protein; run a 10k" onchange="saveGoals(this.value)">${esc(c.goals||"")}</textarea>
+  </div>`;
+
+  const locked = c.lastRun && ago(c.lastRun) < 14;
+  const daysLeft = c.lastRun ? Math.max(0, 14 - ago(c.lastRun)) : 0;
+  h += `<div class="card">`;
+  if(!aiKey){
+    h += `<p class="sub">Set your Anthropic API key on the <b>Diet → Foods</b> tab (⚙ on the Scan card) to enable AI analysis.</p>`;
+  } else if(locked){
+    h += `<button class="ghost" disabled>Next analysis in ${daysLeft} day${daysLeft===1?"":"s"}</button>
+      <p class="sub" style="margin-top:8px">A fresh analysis unlocks every two weeks. You can still ask follow-ups below.</p>`;
+  } else {
+    h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(c.current?"Run a new analysis":"Get AI analysis")}</button>
+      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Runs once every two weeks.</p>`;
+  }
+  if(coachMsg) h += `<p class="sub" style="margin-top:8px;color:${coachMsg.includes("failed")?"var(--bad)":"var(--dim)"}">${esc(coachMsg)}</p>`;
+  h += `</div>`;
+
+  if(c.current){
+    h += `<div class="eyebrow" style="color:var(--dimmer);margin:6px 2px">Analysis · ${shortD(c.current.date)}</div>`;
+    c.current.messages.forEach((m,i)=>{
+      if(i===0) return;                          // hide the compiled data context
+      const isUser = m.role === "user";
+      h += `<div class="coachmsg ${isUser?"cu":"ca"}">${isUser ? esc(m.content) : mdToHtml(m.content)}</div>`;
+    });
+    const used = followupsUsed();
+    if(used < 5){
+      h += `<div class="card">
+        <textarea id="followupInput" class="ta" rows="2" placeholder="Ask a follow-up…"></textarea>
+        <button class="primary" style="margin-top:8px" ${coachBusy?"disabled":""} onclick="sendFollowup()">Send · ${used}/5 used</button>
+      </div>`;
+    } else {
+      h += `<p class="sub" style="text-align:center;margin-top:12px">All 5 follow-ups used for this analysis. A new analysis resets them.</p>`;
+    }
+  }
+  return h;
+}
+
 function addEntry(meal, foodId){
   const food = NUT().foods.find(f=>f.id===foodId);
   if(!food) return;
@@ -1533,11 +1741,11 @@ function render(){
     focus = { id:act.id, sel };
   }
 
-  const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, backup:viewBackup };
+  const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, summary:viewSummary, backup:viewBackup };
   document.getElementById("app").innerHTML =
     (err ? `<div class="err">${esc(err)}</div>` : "") + views[tab]();
   document.getElementById("nav").innerHTML =
-    [["train","Train"],["plan","Plan"],["diet","Diet"],["weight","Weight"],["backup","Backup"]]
+    [["train","Train"],["plan","Plan"],["diet","Diet"],["weight","Weight"],["summary","Summary"],["backup","Backup"]]
     .map(([id,label]) => `<button class="${tab===id?"on":""}" onclick="go('${id}')">${label}</button>`).join("");
 
   if(focus){
