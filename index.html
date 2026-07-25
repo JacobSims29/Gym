@@ -1320,65 +1320,84 @@ Deliver, in clear structured sections with short headers:
 
 Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct, avoid filler, and keep it readable on a phone.`;
 
-function weeklyRate(asc){
-  if(asc.length < 2) return null;
-  const latest = pd(asc[asc.length-1].date).getTime();
-  const win = asc.filter(w => (latest - pd(w.date).getTime())/864e5 <= 28);
-  const reg = win.length >= 2 ? win : asc;
-  const r0 = pd(reg[0].date).getTime();
-  const xs = reg.map(w => (pd(w.date).getTime()-r0)/864e5), ys = reg.map(w => w.value);
+function linRateWk(pts){
+  if(pts.length < 2) return null;
+  const r0 = pd(pts[0].date).getTime();
+  const xs = pts.map(w => (pd(w.date).getTime()-r0)/864e5), ys = pts.map(w => w.value);
   const n=xs.length, sx=xs.reduce((a,b)=>a+b,0), sy=ys.reduce((a,b)=>a+b,0),
         sxx=xs.reduce((a,b)=>a+b*b,0), sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
   const dd = n*sxx - sx*sx;
   return dd ? ((n*sxy - sx*sy)/dd)*7 : 0;
 }
+function weeklyRate(asc){
+  if(asc.length < 2) return null;
+  const latest = pd(asc[asc.length-1].date).getTime();
+  const win = asc.filter(w => (latest - pd(w.date).getTime())/864e5 <= 28);
+  return linRateWk(win.length >= 2 ? win : asc);
+}
 
 function buildCoachContext(){
-  const c = D.coach, lines = [];
+  const c = D.coach, L = [];
   const today0 = pd(today()).getTime();
 
-  lines.push("=== USER GOALS ===");
-  lines.push(c.goals && c.goals.trim() ? c.goals.trim() : "(none written)");
+  L.push("=== INSTRUCTIONS ===");
+  L.push(c.lastRun
+    ? `A previous analysis was done on ${c.lastRun}. Focus your NEW analysis on progress and changes since then, but use the full history below for long-term context and trends.`
+    : `This is the first analysis. Assess the full history below.`);
+
+  L.push("\n=== GOALS ===");
+  L.push(c.goals && c.goals.trim() ? c.goals.trim() : "(none written)");
 
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
-  lines.push("\n=== BODYWEIGHT ===");
+  L.push("\n=== BODYWEIGHT (full history) ===");
   if(asc.length){
-    lines.push(`Current: ${asc[asc.length-1].value} lb (${asc[asc.length-1].date})`);
-    const r = weeklyRate(asc);
-    if(r!=null) lines.push(`4-week rate: ${r.toFixed(2)} lb/week`);
-    lines.push(`Recent weigh-ins: ${asc.slice(-10).map(w=>w.date+":"+w.value).join(", ")}`);
-  } else lines.push("No weigh-ins logged.");
+    L.push(`${asc.length} weigh-ins, ${asc[0].date} (${asc[0].value} lb) → ${asc[asc.length-1].date} (${asc[asc.length-1].value} lb).`);
+    const rAll = linRateWk(asc), r4 = weeklyRate(asc);
+    if(rAll!=null) L.push(`Overall rate: ${rAll.toFixed(2)} lb/week. Recent 4-week rate: ${r4.toFixed(2)} lb/week.`);
+    const show = asc.length > 40 ? asc.slice(-40) : asc;
+    L.push(`${asc.length>40?"Last 40 ":"All "}weigh-ins: ${show.map(w=>w.date+":"+w.value).join(", ")}`);
+  } else L.push("None logged.");
 
   const t = NUT().targets;
-  lines.push("\n=== NUTRITION TARGETS ===");
-  lines.push(`Calories ${t.calMin}-${t.calMax} | Protein ${t.pMin}-${t.pMax}g | Carbs ${t.cMin}-${t.cMax}g | Fat ${t.fMin}-${t.fMax}g`);
+  L.push("\n=== NUTRITION TARGETS ===");
+  L.push(`Calories ${t.calMin}-${t.calMax} | Protein ${t.pMin}-${t.pMax}g | Carbs ${t.cMin}-${t.cMax}g | Fat ${t.fMin}-${t.fMax}g`);
 
-  const days = [];
-  for(let i=0;i<14;i++){
-    const ds = iso(new Date(today0 - i*864e5));
-    if(dayEntries(ds).length) days.push(dayTotals(ds));
-  }
-  lines.push("\n=== NUTRITION, LAST 14 DAYS (logged days only) ===");
-  if(days.length){
-    const s = days.reduce((a,d)=>({cal:a.cal+d.cal,p:a.p+d.protein,c:a.c+d.carb,f:a.f+d.fat}),{cal:0,p:0,c:0,f:0});
-    const n = days.length;
-    lines.push(`Days logged: ${n}/14`);
-    lines.push(`Average per logged day: ${round(s.cal/n)} cal, ${round(s.p/n)}g protein, ${round(s.c/n)}g carb, ${round(s.f/n)}g fat`);
-  } else lines.push("No nutrition logged in the last 14 days.");
+  const logDates = Object.keys(NUT().log).filter(d=>dayEntries(d).length).sort();
+  L.push("\n=== NUTRITION ADHERENCE ===");
+  if(logDates.length){
+    const avg = dates => {
+      const s = dates.reduce((a,ds)=>{const x=dayTotals(ds);return{cal:a.cal+x.cal,p:a.p+x.protein,c:a.c+x.carb,f:a.f+x.fat};},{cal:0,p:0,c:0,f:0});
+      const n = dates.length;
+      return `${round(s.cal/n)} cal, ${round(s.p/n)}g P, ${round(s.c/n)}g C, ${round(s.f/n)}g F (${n} days)`;
+    };
+    L.push(`Full-period avg/day: ${avg(logDates)}. Range ${logDates[0]}–${logDates[logDates.length-1]}.`);
+    const recent = logDates.filter(ds => (today0 - pd(ds).getTime())/864e5 <= 14);
+    if(recent.length) L.push(`Last 14 days avg/day: ${avg(recent)}.`);
+  } else L.push("No nutrition logged.");
 
-  lines.push("\n=== TRAINING, LAST 14 DAYS ===");
-  const recent = D.sessions.filter(s => (today0 - pd(s.date).getTime())/864e5 <= 14).sort((a,b)=>a.date.localeCompare(b.date));
-  if(recent.length){
-    recent.forEach(s=>{
-      if(s.workout==="C") lines.push(`${s.date} Cardio: ${cardioText(s)}`);
-      else {
-        const exs = (s.exercises||[]).map(e=>`${e.name} ${(e.sets||[]).length} sets (vol ${round(exVolume(e))})`).join("; ");
-        lines.push(`${s.date} ${wLabel(s.workout)}: ${exs}`);
-      }
+  L.push("\n=== TRAINING ===");
+  const sess = [...D.sessions].sort((a,b)=>a.date.localeCompare(b.date));
+  if(sess.length){
+    L.push(`${sess.length} sessions, ${sess[0].date} → ${sess[sess.length-1].date}.`);
+    const byEx = {};
+    sess.forEach(s => (s.exercises||[]).forEach(e => { (byEx[e.name]=byEx[e.name]||[]).push({date:s.date, e}); }));
+    L.push("Per-exercise progression (first → latest):");
+    Object.keys(byEx).forEach(name=>{
+      const arr = byEx[name], f = arr[0].e, l = arr[arr.length-1].e;
+      const fmt = e => `${fmtNum(Math.round(meanOf(e.sets,"weight")*10)/10)}lb×${(e.sets||[]).length}×${Math.round(meanOf(e.sets,"reps"))} vol ${round(exVolume(e))}`;
+      L.push(`  ${name}: done ${arr.length}× | ${arr[0].date} ${fmt(f)} → ${arr[arr.length-1].date} ${fmt(l)}`);
     });
-  } else lines.push("No training sessions in the last 14 days.");
+    const recent = sess.filter(s => (today0 - pd(s.date).getTime())/864e5 <= 14);
+    L.push("Recent sessions (last 14 days):");
+    if(recent.length) recent.forEach(s=>{
+      if(s.workout==="C") L.push(`  ${s.date} Cardio: ${cardioText(s)}`);
+      else L.push(`  ${s.date} ${wLabel(s.workout)}: ` + (s.exercises||[]).map(e=>`${e.name} vol ${round(exVolume(e))}`).join("; "));
+    }); else L.push("  (none)");
+    const cardioN = sess.filter(s=>s.workout==="C").length;
+    if(cardioN) L.push(`Total cardio sessions: ${cardioN}.`);
+  } else L.push("No training logged.");
 
-  return lines.join("\n");
+  return L.join("\n");
 }
 
 async function callCoach(messages, maxTokens){
@@ -1412,6 +1431,7 @@ async function runAnalysis(){
   try{
     const messages = [{ role:"user", content: buildCoachContext() + "\n\nGive me a full progress analysis and recommendations." }];
     const reply = await callCoach(messages, 1500);
+    if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     messages.push({ role:"assistant", content: reply });
     D.coach.current = { date: today(), messages };
     D.coach.lastRun = today();
@@ -1436,6 +1456,7 @@ async function sendFollowup(){
   D.coach.current.messages.push({ role:"user", content: text });
   try{
     const reply = await callCoach(D.coach.current.messages, 1000);
+    if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     D.coach.current.messages.push({ role:"assistant", content: reply });
     coachBusy = false; coachMsg = "";
     save(); render();
@@ -1465,7 +1486,8 @@ function viewSummary(){
     <textarea id="goalsInput" class="ta" rows="4" placeholder="e.g. drop to ~175 lb while keeping strength; hit 180g protein; run a 10k" onchange="saveGoals(this.value)">${esc(c.goals||"")}</textarea>
   </div>`;
 
-  const locked = c.lastRun && ago(c.lastRun) < 14;
+  const hasAnalysis = c.current && c.current.messages.some(m => m.role==="assistant" && (m.content||"").trim());
+  const locked = hasAnalysis && c.lastRun && ago(c.lastRun) < 14;
   const daysLeft = c.lastRun ? Math.max(0, 14 - ago(c.lastRun)) : 0;
   h += `<div class="card">`;
   if(!aiKey){
@@ -1474,13 +1496,13 @@ function viewSummary(){
     h += `<button class="ghost" disabled>Next analysis in ${daysLeft} day${daysLeft===1?"":"s"}</button>
       <p class="sub" style="margin-top:8px">A fresh analysis unlocks every two weeks. You can still ask follow-ups below.</p>`;
   } else {
-    h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(c.current?"Run a new analysis":"Get AI analysis")}</button>
-      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Runs once every two weeks.</p>`;
+    h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(hasAnalysis?"Run a new analysis":"Get AI analysis")}</button>
+      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history; runs once every two weeks.</p>`;
   }
   if(coachMsg) h += `<p class="sub" style="margin-top:8px;color:${coachMsg.includes("failed")?"var(--bad)":"var(--dim)"}">${esc(coachMsg)}</p>`;
   h += `</div>`;
 
-  if(c.current){
+  if(hasAnalysis){
     h += `<div class="eyebrow" style="color:var(--dimmer);margin:6px 2px">Analysis · ${shortD(c.current.date)}</div>`;
     c.current.messages.forEach((m,i)=>{
       if(i===0) return;                          // hide the compiled data context
