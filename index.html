@@ -222,14 +222,14 @@ let aiModel = "haiku";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 9;   // bump whenever the saved data shape changes, and add a migration below
+const SCHEMA = 10;  // bump whenever the saved data shape changes, and add a migration below
 const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
 const EMPTY = {
   schema:SCHEMA,
   templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}],
   sessions:[], weights:[], photos:[], lastBackup:null,
   scratch:{},
-  coach:{ goals:"", lastRun:null, current:null },
+  coach:{ goals:"", lastRun:null, current:null, history:[] },
   nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{} }
 };
 
@@ -326,6 +326,12 @@ const MIGRATIONS = {
   // 8 → 9: AI coach (goals, biweekly analysis, follow-ups)
   8(d){
     if(!d.coach) d.coach = { goals:"", lastRun:null, current:null };
+    return d;
+  },
+  // 9 → 10: coach keeps an archive of past analyses so it can reference them later
+  9(d){
+    if(!d.coach) d.coach = { goals:"", lastRun:null, current:null };
+    if(!Array.isArray(d.coach.history)) d.coach.history = [];
     return d;
   }
 };
@@ -1307,11 +1313,13 @@ async function runScan(){
 /* ============ AI coach (Summary tab) ============ */
 let coachBusy = false;
 let coachMsg = "";
+let openPast = {};                       // archive index -> expanded
+function togglePast(i){ openPast[i] = !openPast[i]; render(); }
 
 const COACH_SYSTEM =
 `You are a single trusted expert combining three roles: a licensed physical therapist, a registered dietitian, and a science-based strength & conditioning coach. You give evidence-based, practical, specific guidance.
 
-You will receive a compiled summary of the user's last two weeks: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals.
+You will receive a compiled summary of the user's full logged history: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals. You may also receive the analyses you wrote in previous sessions. Treat those as your own memory: check whether your earlier recommendations were followed and what happened, say plainly when something you predicted or prescribed did not work, and build on that advice instead of restating it. Analyses are run roughly every two weeks, so the window since your last one is the main thing to judge.
 
 Deliver, in clear structured sections with short headers:
 1. Progress — where they are versus their goals, reading the bodyweight trend and adherence honestly.
@@ -1336,14 +1344,50 @@ function weeklyRate(asc){
   return linRateWk(win.length >= 2 ? win : asc);
 }
 
-function buildCoachContext(){
+/* ---- analysis archive -------------------------------------------------- */
+const COACH_KEEP     = 12;    // analyses retained in storage
+const COACH_SEND     = 3;     // most recent analyses sent back to the model in full
+const CLIP_ASSISTANT = 4000;  // chars of a past analysis to resend
+const CLIP_USER      = 600;   // chars of a past follow-up to resend
+const clip = (s, n) => { s = String(s||""); return s.length > n ? s.slice(0, n) + " …[truncated]" : s; };
+
+// history array as it would stand if the current analysis were archived right now
+function coachArchive(){
+  const c = D.coach;
+  const hist = (c.history || []).slice();
+  if(c.current && (c.current.messages||[]).some(m => m.role==="assistant" && (m.content||"").trim())){
+    hist.push({ date: c.current.date, messages: c.current.messages.slice(1) });  // drop the data blob
+  }
+  return hist.slice(-COACH_KEEP);
+}
+
+function pastAnalysesBlock(hist){
+  if(!hist.length) return "";
+  const L = ["\n=== YOUR PREVIOUS ANALYSES (oldest first) ==="];
+  const older = hist.slice(0, Math.max(0, hist.length - COACH_SEND));
+  if(older.length) L.push(`Earlier analyses were written on: ${older.map(a=>a.date).join(", ")} (full text omitted here).`);
+  hist.slice(-COACH_SEND).forEach(a => {
+    L.push(`\n--- Analysis of ${a.date} ---`);
+    (a.messages||[]).forEach(m => {
+      if(m.role === "assistant") L.push("YOU WROTE: " + clip(m.content, CLIP_ASSISTANT));
+      else                       L.push("USER ASKED: " + clip(m.content, CLIP_USER));
+    });
+  });
+  return L.join("\n");
+}
+
+function buildCoachContext(hist){
   const c = D.coach, L = [];
   const today0 = pd(today()).getTime();
+  hist = hist || [];
 
   L.push("=== INSTRUCTIONS ===");
-  L.push(c.lastRun
-    ? `A previous analysis was done on ${c.lastRun}. Focus your NEW analysis on progress and changes since then, but use the full history below for long-term context and trends.`
+  L.push(hist.length
+    ? `Your previous analyses are reproduced below; the most recent was ${hist[hist.length-1].date} (${ago(hist[hist.length-1].date)} days ago). Judge what has changed since then: which of your recommendations were followed, which were not, and what the data show as a result. Do not repeat that advice verbatim — revise it. Use the full history for long-term trends.`
     : `This is the first analysis. Assess the full history below.`);
+
+  const past = pastAnalysesBlock(hist);
+  if(past) L.push(past);
 
   L.push("\n=== GOALS ===");
   L.push(c.goals && c.goals.trim() ? c.goals.trim() : "(none written)");
@@ -1432,14 +1476,25 @@ async function callCoach(messages, maxTokens){
 
 function saveGoals(v){ D.coach.goals = v; save(); }
 
-async function runAnalysis(){
+/* Two-week lock: days still to wait before a new analysis is allowed (0 = ready) */
+const COACH_INTERVAL = 14;
+function lockDaysLeft(){
+  const lr = D.coach.lastRun;
+  if(!lr) return 0;
+  return Math.max(0, COACH_INTERVAL - ago(lr));
+}
+
+async function runAnalysis(force){
   if(!aiKey){ coachMsg = "Set your API key on the Diet → Foods tab (⚙) first."; render(); return; }
+  if(!force && lockDaysLeft() > 0){ coachMsg = `Next analysis unlocks in ${lockDaysLeft()} day(s).`; render(); return; }
+  const hist = coachArchive();     // includes the analysis currently on screen
   coachBusy = true; coachMsg = "Analyzing your history with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
   try{
-    const messages = [{ role:"user", content: buildCoachContext() + "\n\nAs my coach, give me a full progress analysis and evidence-based, sustainable recommendations for a healthy adult pursuing general fitness and body-composition goals." }];
+    const messages = [{ role:"user", content: buildCoachContext(hist) + "\n\nAs my coach, give me a full progress analysis and evidence-based, sustainable recommendations for a healthy adult pursuing general fitness and body-composition goals." }];
     const reply = await callCoach(messages, 25000);
     if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     messages.push({ role:"assistant", content: reply });
+    D.coach.history = hist;        // only commit the archive once the new one succeeded
     D.coach.current = { date: today(), messages };
     D.coach.lastRun = today();
     coachBusy = false; coachMsg = "";
@@ -1494,15 +1549,18 @@ function viewSummary(){
   </div>`;
 
   const hasAnalysis = c.current && c.current.messages.some(m => m.role==="assistant" && (m.content||"").trim());
-  const locked = false;   // two-week lock disabled for testing
+  const left = lockDaysLeft();            // two-week lock between analyses
   h += `<div class="card">`;
   if(!aiKey){
     h += `<p class="sub">Set your Anthropic API key on the <b>Diet → Foods</b> tab (⚙ on the Scan card) to enable AI analysis.</p>`;
-  } else if(locked){
-    h += `<button class="ghost" disabled>Locked</button>`;
+  } else if(left > 0){
+    const next = iso(new Date(pd(c.lastRun).getTime() + COACH_INTERVAL*864e5));
+    h += `<button class="ghost" disabled>Locked · ${left} day${left===1?"":"s"} left</button>
+      <p class="sub" style="margin-top:8px">Analyses run every ${COACH_INTERVAL} days so there is real change to judge. Last run ${shortD(c.lastRun)} · next ${shortD(next)}. Follow-ups below still work.</p>
+      <p class="sub" style="margin-top:6px"><a href="#" style="color:var(--dim)" onclick="event.preventDefault();if(confirm('Run early? This archives the current analysis and resets the ${COACH_INTERVAL}-day timer.'))runAnalysis(true)">Run early anyway</a></p>`;
   } else {
     h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(hasAnalysis?"Run a new analysis":"Get AI analysis")}</button>
-      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history.</p>`;
+      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history${(c.history||[]).length?" and your previous "+(c.history||[]).length+" analys"+((c.history||[]).length===1?"is":"es"):""}.</p>`;
   }
   if(coachMsg) h += `<p class="sub" style="margin-top:8px;color:${coachMsg.includes("failed")?"var(--bad)":"var(--dim)"}">${esc(coachMsg)}</p>`;
   h += `</div>`;
@@ -1523,6 +1581,26 @@ function viewSummary(){
     } else {
       h += `<p class="sub" style="text-align:center;margin-top:12px">All 5 follow-ups used for this analysis. A new analysis resets them.</p>`;
     }
+  }
+
+  const hist = c.history || [];
+  if(hist.length){
+    h += `<div class="eyebrow" style="color:var(--dimmer);margin:18px 2px 6px">Earlier analyses (kept as coach memory)</div>`;
+    hist.slice().reverse().forEach((a, k) => {
+      const i = hist.length - 1 - k;
+      const open = !!openPast[i];
+      h += `<div class="card" style="margin-bottom:8px">
+        <div onclick="togglePast(${i})" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer">
+          <span><span class="caret" style="margin-right:6px;display:inline-block">${open?"▾":"▸"}</span>${shortD(a.date)}</span>
+          <span class="sub">${(a.messages||[]).filter(m=>m.role==="user").length} follow-up(s)</span>
+        </div>`;
+      if(open) (a.messages||[]).forEach(m => {
+        const isUser = m.role === "user";
+        h += `<div class="coachmsg ${isUser?"cu":"ca"}" style="margin-top:10px">${isUser ? esc(m.content) : mdToHtml(m.content)}</div>`;
+      });
+      h += `</div>`;
+    });
+    h += `<p class="sub" style="text-align:center;margin-top:6px">The last ${COACH_SEND} are sent back to the coach in full; older ones by date only. Last ${COACH_KEEP} kept.</p>`;
   }
   return h;
 }
