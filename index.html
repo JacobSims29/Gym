@@ -578,13 +578,13 @@ function viewTrain(){
 
   let h = `
   <div class="hdr">
-    <button class="arrow" onclick="shiftDay(-1)">‹</button>
+    <button class="arrow" onclick="${calOpen?"shiftMonth(-1)":"shiftDay(-1)"}">‹</button>
     <div class="mid" onclick="toggleCal()">
-      <div class="eyebrow">Week ${wk(trainDate)} · ${dow(trainDate)}</div>
+      <div class="eyebrow">${calOpen ? `${MONTHS[calMonth.getMonth()]} ${calMonth.getFullYear()}` : `Week ${wk(trainDate)} · ${dow(trainDate)}`}</div>
       <h2>${shortD(trainDate)}</h2>
       <div class="caret">${calOpen ? "▲ close calendar" : "▼ pick a date"}</div>
     </div>
-    <button class="arrow" onclick="shiftDay(1)">›</button>
+    <button class="arrow" onclick="${calOpen?"shiftMonth(1)":"shiftDay(1)"}">›</button>
   </div>`;
 
   if(calOpen) h += calendarHTML();
@@ -750,10 +750,17 @@ function chartSVG(){
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
   if(asc.length < 2) return `<p class="sub" style="text-align:center;padding:24px 0">Log two weigh-ins and the graph appears.</p>`;
 
-  // EWMA trend (denoised, continuous). alpha ~ 2/(N+1) with N≈10-day span.
-  const alpha = 0.25;
+  // EWMA trend, weighted by elapsed DAYS rather than by measurement index, so a
+  // gap between weigh-ins decays the old value the way real time would.
+  // alpha is per day: the previous trend keeps (1-alpha)^Δdays of its weight.
+  const alphaDay = 0.25;
   const trend = [];
-  asc.forEach((w,i)=>{ trend.push(i===0 ? w.value : alpha*w.value + (1-alpha)*trend[i-1]); });
+  asc.forEach((w,i)=>{
+    if(i===0){ trend.push(w.value); return; }
+    const gap = Math.max(1, (pd(w.date).getTime()-pd(asc[i-1].date).getTime())/864e5);
+    const a = 1 - Math.pow(1-alphaDay, gap);          // → 1 as the gap grows
+    trend.push(a*w.value + (1-a)*trend[i-1]);
+  });
 
   // lb/week from a linear fit over the trailing 4 weeks (falls back to all data if <2 points in window)
   const latest = pd(asc[asc.length-1].date).getTime();
@@ -771,13 +778,34 @@ function chartSVG(){
   const allV = [...asc.map(w=>w.value), ...trend];
   const min = Math.min(...allV)-1, max = Math.max(...allV)+1;
   const W=440,H=160,L=34,R=8,T=10,B=22;
-  const x = i => L + (i/(asc.length-1))*(W-L-R);
+
+  // x axis is elapsed time, so a gap between weigh-ins shows as a gap on the chart
+  const t0 = pd(asc[0].date).getTime();
+  const spanD = Math.max(1, (pd(asc[asc.length-1].date).getTime() - t0)/864e5);
+  const x = ds => L + (((pd(ds).getTime()-t0)/864e5)/spanD)*(W-L-R);
   const y = v => T + (1-(v-min)/(max-min))*(H-T-B);
+
   const grid = [max,(max+min)/2,min].map(v=>
     `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-R}" y2="${y(v).toFixed(1)}" stroke="#262626"/>
      <text x="0" y="${(y(v)+4).toFixed(1)}" fill="#525252" font-size="10" font-family="monospace">${v.toFixed(1)}</text>`).join("");
-  const dots = asc.map((w,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2" fill="#525252"/>`).join("");
-  const trendPts = trend.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+
+  // faint vertical rule + label at the first of each month inside the window
+  let ticks = "";
+  {
+    const end = pd(asc[asc.length-1].date);
+    let m = new Date(pd(asc[0].date).getFullYear(), pd(asc[0].date).getMonth()+1, 1);
+    while(m <= end){
+      const px = x(iso(m));
+      if(px > L+18 && px < W-R-18){
+        ticks += `<line x1="${px.toFixed(1)}" y1="${T}" x2="${px.toFixed(1)}" y2="${H-B}" stroke="#1f1f1f"/>
+          <text x="${px.toFixed(1)}" y="${H-4}" fill="#3f3f3f" font-size="9" text-anchor="middle">${MONTHS[m.getMonth()].slice(0,3)}</text>`;
+      }
+      m = new Date(m.getFullYear(), m.getMonth()+1, 1);
+    }
+  }
+
+  const dots = asc.map(w=>`<circle cx="${x(w.date).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2" fill="#525252"/>`).join("");
+  const trendPts = trend.map((v,i)=>`${x(asc[i].date).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
 
   const slopeStr = (slopeWk>0?"+":"") + slopeWk.toFixed(2) + " lb/wk";
   const slopeColor = slopeWk < 0 ? "var(--good)" : (slopeWk > 0 ? "var(--dim)" : "var(--dimmer)");
@@ -789,12 +817,13 @@ function chartSVG(){
     </div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="170">
       ${grid}
+      ${ticks}
       ${dots}
       <polyline points="${trendPts}" fill="none" stroke="#fbbf24" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
       <text x="${L}" y="${H-4}" fill="#525252" font-size="10">${shortD(asc[0].date)}</text>
       <text x="${W-R}" y="${H-4}" fill="#525252" font-size="10" text-anchor="end">${shortD(asc[asc.length-1].date)}</text>
     </svg>
-    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend.</p>
+    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend. The x axis is calendar time (${Math.round(spanD)} days), so gaps between weigh-ins show as gaps.</p>
   </div>`;
 }
 function viewWeight(){
@@ -852,9 +881,13 @@ function viewBackup(){
 
 /* ============ diet ============ */
 const MEALS = ["Breakfast","Lunch","Dinner","Snacks"];
-const MASS = { g:1, oz:28.3495, lb:453.592 };                       // → grams
-const VOL  = { ml:1, tbsp:14.7868, "fl oz":29.5735, cup:236.588 };  // → millilitres
-const unitTable = base => base==="ml" ? VOL : MASS;
+const MASS  = { g:1, oz:28.3495, lb:453.592 };                       // → grams
+const VOL   = { ml:1, tbsp:14.7868, "fl oz":29.5735, cup:236.588 };  // → millilitres
+const COUNT = { ct:1 };                                              // whole items; no conversions
+const unitTable = base => base==="ml" ? VOL : (base==="ct" ? COUNT : MASS);
+const UNIT_DEFAULT_AMOUNT = { g:100, ml:100, ct:1 };
+// "180g" / "250ml" / "2 ct" — count reads better with a space
+const unitLabel = (amount, u) => u==="ct" ? `${amount} ct` : `${amount}${u}`;
 
 let dietDate = today();
 let dietSub = "day";              // "day" | "foods" | "goals"
@@ -933,13 +966,13 @@ function dietDay(){
 
   let h = `
   <div class="hdr">
-    <button class="arrow" onclick="shiftDietDay(-1)">‹</button>
+    <button class="arrow" onclick="${dietCalOpen?"shiftMonth(-1)":"shiftDietDay(-1)"}">‹</button>
     <div class="mid" onclick="toggleDietCal()">
-      <div class="eyebrow">${dow(dietDate)}</div>
+      <div class="eyebrow">${dietCalOpen ? `${MONTHS[calMonth.getMonth()]} ${calMonth.getFullYear()}` : dow(dietDate)}</div>
       <h2>${shortD(dietDate)}</h2>
       <div class="caret">${dietCalOpen ? "▲ close calendar" : "▼ pick a date"}</div>
     </div>
-    <button class="arrow" onclick="shiftDietDay(1)">›</button>
+    <button class="arrow" onclick="${dietCalOpen?"shiftMonth(1)":"shiftDietDay(1)"}">›</button>
   </div>`;
   if(dietCalOpen) h += monthCalendar(dietDate, "pickDietDate", dietDots);
 
@@ -1040,7 +1073,7 @@ function addPicker(meal){
     foods.slice(0,20).forEach(f=>{
       const u = f.refUnit || "g";
       h += `<div class="pickrow">
-        <div><div class="fn">${esc(f.name)}</div><div class="fq">adds ${esc(f.amount)}${u} · ${round(+f.cal||0)} cal · ${round(+f.protein||0)}p</div></div>
+        <div><div class="fn">${esc(f.name)}</div><div class="fq">adds ${esc(unitLabel(f.amount, u))} · ${round(+f.cal||0)} cal · ${round(+f.protein||0)}p</div></div>
         <button class="padd" onclick="addEntry('${meal}','${f.id}')">Add</button>
       </div>`;
     });
@@ -1091,7 +1124,7 @@ function aiScanCard(){
 }
 
 function dietFoods(){
-  let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
+  let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids, or ct for whole items like an egg or a bar — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
 
   h += aiScanCard();
 
@@ -1103,7 +1136,9 @@ function dietFoods(){
     <div class="qty" style="margin-top:8px">
       <span class="sub">per</span>
       <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="${sr.grams!=null?esc(sr.grams):"100"}">
-      <select id="nfUnit"><option value="g">g</option><option value="ml">ml</option></select>
+      <select id="nfUnit" onchange="onNewFoodUnit(this.value)">
+        <option value="g">g</option><option value="ml">ml</option><option value="ct">ct (count)</option>
+      </select>
     </div>
     <div class="macros">
       <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0" value="${sr.cal!=null?esc(sr.cal):""}"></div>
@@ -1133,6 +1168,7 @@ function dietFoods(){
         <select onchange="editFood('${f.id}','refUnit',this.value)">
           <option value="g" ${u==="g"?"selected":""}>g</option>
           <option value="ml" ${u==="ml"?"selected":""}>ml</option>
+          <option value="ct" ${u==="ct"?"selected":""}>ct (count)</option>
         </select>
       </div>
       <div class="macros">
@@ -1626,14 +1662,22 @@ function delEntry(id){
   save(); render();
 }
 
+// switching the new-food unit swaps the placeholder amount (1 for ct, 100 for g/ml)
+// but only while it still holds a default, so a typed number is never clobbered
+function onNewFoodUnit(v){
+  const a = document.getElementById("nfAmount");
+  if(!a) return;
+  if(a.value==="" || a.value==="1" || a.value==="100") a.value = String(UNIT_DEFAULT_AMOUNT[v] || 100);
+}
 function addFood(){
   const name = document.getElementById("nfName").value.trim();
   if(!name){ err="Give the food a name."; render(); return; }
   const num = id => parseFloat(document.getElementById(id).value) || 0;
+  const unit = document.getElementById("nfUnit").value;
   NUT().foods.push({
     id:"f"+Date.now(), name,
-    amount: num("nfAmount")||100,
-    refUnit: document.getElementById("nfUnit").value,
+    amount: num("nfAmount") || UNIT_DEFAULT_AMOUNT[unit] || 100,
+    refUnit: unit,
     cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fat:num("nfF")
   });
   NUT().foods.sort((a,b)=>a.name.localeCompare(b.name));
@@ -1643,7 +1687,13 @@ function addFood(){
 function editFood(id,f,v){
   const food = NUT().foods.find(x=>x.id===id);
   if(!food) return;
-  food[f] = (f==="name" || f==="refUnit") ? v : (parseFloat(v)||0);
+  if(f==="refUnit"){
+    const wasDefault = food.amount === (UNIT_DEFAULT_AMOUNT[food.refUnit || "g"] || 100);
+    food.refUnit = v;
+    if(wasDefault) food.amount = UNIT_DEFAULT_AMOUNT[v] || 100;   // 100g → 1 ct, 1 ct → 100g
+  } else {
+    food[f] = (f==="name") ? v : (parseFloat(v)||0);
+  }
   save();
   if(f==="name" || f==="refUnit") render();
 }
