@@ -13,7 +13,7 @@
   :root{
     --bg:#0a0a0a; --card:#171717; --line:#262626; --line2:#404040;
     --text:#f5f5f5; --dim:#a3a3a3; --dimmer:#525252;
-    --accent:#fbbf24; --good:#34d399; --bad:#f87171; --cardio:#60a5fa;
+    --accent:#fbbf24; --good:#34d399; --bad:#f87171; --steps:#60a5fa;
   }
   body{
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -56,7 +56,7 @@
   .seg{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px}
   .seg button{border:1px solid var(--line);background:var(--card);color:var(--dimmer);padding:12px 4px;font-size:14px}
   .seg button.on{border-color:var(--accent);background:#262626;color:var(--text)}
-  .seg button.on.cardio{border-color:var(--cardio)}
+  .seg button.on.steps{border-color:var(--steps)}
 
   .nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
     display:grid;grid-template-columns:repeat(6,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
@@ -143,7 +143,7 @@
   .cd.sel{background:var(--accent);color:#0a0a0a;font-weight:700}
   .dots{display:flex;gap:2px;height:4px;margin-top:2px}
   .dot{width:4px;height:4px;border-radius:50%;background:var(--accent)}
-  .dot.c{background:var(--cardio)}
+  .dot.c{background:var(--steps)}
   .cd.sel .dot{background:#0a0a0a}
 
   .list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 4px;
@@ -454,18 +454,18 @@ document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState 
 
 /* ============ train state ============ */
 let trainDate = today();
-let trainWorkout = "A";          // a template id, or "C" for cardio
+let trainWorkout = "A";          // a template id, or "C" for the Steps slot
 let planWhich = "A";             // template id being edited on the Plan tab
 let draft = [];                  // ordered rows for the day being edited
 let openEx = {};                 // exercise _uid -> expanded in Train
-let cardioDraft = { minutes:"", miles:"" };
+let stepsDraft = "";             // the Steps slot reuses workout tag "C"
 let justSaved = false;
 let calOpen = false;
 let calMonth = new Date();       // any date inside the shown month
 
-const isCardio = w => w === "C";
+const isSteps = w => w === "C";   // tag kept as "C" so pre-Steps sessions stay addressable
 const tpl = id => D.templates.find(t => t.id === id);
-const wLabel = w => w==="C" ? "Cardio" : (tpl(w) ? tpl(w).name : "Workout");
+const wLabel = w => w==="C" ? "Steps" : (tpl(w) ? tpl(w).name : "Workout");
 const firstTemplateId = () => (D.templates[0] && D.templates[0].id) || "C";
 
 // keep the two selections pointing at something that still exists
@@ -492,16 +492,28 @@ function lastLiftBefore(name, date){
 function exVolume(e){
   return (e.sets||[]).reduce((v,s)=> v + (parseFloat(s.weight)||0)*(parseFloat(s.reps)||0), 0);
 }
-function lastCardio(){
-  const c = [...D.sessions].filter(s=>s.workout==="C").sort((a,b)=>a.date.localeCompare(b.date));
+// most recent day with a step count (skips pre-Steps cardio-only records)
+function lastSteps(){
+  const c = D.sessions.filter(s => s.workout==="C" && s.date!==trainDate && s.steps!=null && s.steps!=="")
+                      .sort((a,b)=>a.date.localeCompare(b.date));
   return c.length ? c[c.length-1] : null;
 }
-function cardioText(s){
+// mean daily steps over the trailing n days, counting only days that were logged
+function stepsAvg(n){
+  const cut = pd(today()).getTime() - n*864e5;
+  const v = D.sessions.filter(s => s.workout==="C" && pd(s.date).getTime() >= cut)
+                      .map(s => parseFloat(s.steps)||0).filter(x => x > 0);
+  return v.length ? { avg: Math.round(v.reduce((a,b)=>a+b,0)/v.length), days: v.length } : null;
+}
+// legacy minutes/miles from the old Cardio slot — still shown so nothing looks deleted
+function dayDetail(s){
   const p = [];
+  if(s.steps!=null && s.steps!=="") p.push(commas(Math.round(parseFloat(s.steps)||0)) + " steps");
   if(s.cardio && s.cardio.minutes) p.push(s.cardio.minutes+" min");
   if(s.cardio && s.cardio.miles) p.push(s.cardio.miles+" mi");
   return p.join(" · ") || "logged";
 }
+const commas = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 let uidCounter = 0;
 const scratchKey = () => trainDate + "|" + trainWorkout;
@@ -509,11 +521,8 @@ function withUid(e){ return { _uid: ++uidCounter, name:e.name, sets:(e.sets||[])
 
 function seedDraft(){
   const ex = sessionOn(trainDate, trainWorkout);
-  if(isCardio(trainWorkout)){
-    cardioDraft = {
-      minutes: ex && ex.cardio ? (ex.cardio.minutes||"") : "",
-      miles:   ex && ex.cardio ? (ex.cardio.miles||"")   : ""
-    };
+  if(isSteps(trainWorkout)){
+    stepsDraft = ex && ex.steps!=null ? String(ex.steps) : "";
     justSaved = false;
     return;
   }
@@ -592,28 +601,28 @@ function viewTrain(){
   h += `<div class="seg">
     ${[...D.templates.map(t=>t.id), "C"].map(w=>{
       const done = sessionOn(trainDate,w);
-      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"cardio":""}" onclick="pickWorkout('${w}')">${esc(wLabel(w))}${done?' <span class="up">✓</span>':""}</button>`;
+      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"steps":""}" onclick="pickWorkout('${w}')">${esc(wLabel(w))}${done?' <span class="up">✓</span>':""}</button>`;
     }).join("")}
   </div>`;
 
-  if(isCardio(trainWorkout)){
-    const prev = lastCardio();
+  if(isSteps(trainWorkout)){
+    const prev = lastSteps();
+    const a7 = stepsAvg(7), a28 = stepsAvg(28);
+    const legacy = existing && existing.cardio && (existing.cardio.minutes || existing.cardio.miles);
     h += `
     <div class="card">
       <div class="lift">
-        <h3>Walk / Run</h3>
-        <span class="last">${prev ? `last: ${cardioText(prev)} (${shortD(prev.date)})` : "first time"}</span>
+        <h3>Steps</h3>
+        <span class="last">${prev ? `last: ${commas(Math.round(parseFloat(prev.steps)||0))} (${shortD(prev.date)})` : "first time"}</span>
       </div>
-      <div class="row" style="margin-bottom:8px">
-        <input class="num grow" type="number" inputmode="decimal" placeholder="minutes"
-          value="${esc(cardioDraft.minutes)}" oninput="setCardio('minutes',this.value)">
-        <input class="num grow" type="number" inputmode="decimal" step="0.01" placeholder="miles"
-          value="${esc(cardioDraft.miles)}" oninput="setCardio('miles',this.value)">
-      </div>
-      <p class="sub">Fill in either one, or both.</p>
+      <input class="num grow" style="width:100%" type="number" inputmode="numeric" placeholder="steps today"
+        value="${esc(stepsDraft)}" oninput="setSteps(this.value)">
+      ${a7 ? `<p class="sub" style="margin-top:8px">7-day avg ${commas(a7.avg)} over ${a7.days} logged day${a7.days===1?"":"s"}${a28?` · 28-day avg ${commas(a28.avg)}`:""}</p>` : ""}
+      ${legacy ? `<p class="sub" style="margin-top:6px;color:var(--steps)">This day also has older cardio logged: ${esc(dayDetail({cardio:existing.cardio}))}. It is kept, not overwritten.</p>` : ""}
+      <p class="sub" style="margin-top:6px">Read the count off your phone's Health app and type it in — iOS doesn't expose Health data to web apps.</p>
     </div>
-    <button class="${justSaved?"saved":"primary"}" onclick="saveCardio()">
-      ${justSaved ? "✓ Saved" : existing ? "Update cardio" : "Save cardio"}
+    <button class="${justSaved?"saved":"primary"}" onclick="saveSteps()">
+      ${justSaved ? "✓ Saved" : existing ? "Update steps" : "Save steps"}
     </button>`;
     return h + historyHTML();
   }
@@ -645,7 +654,7 @@ function viewTrain(){
         h += `<div class="setrow">
           <span class="setnum">${j+1}</span>
           <input class="num" type="number" inputmode="decimal" placeholder="lb" value="${esc(s.weight)}" oninput="setSetVal(${i},${j},'weight',this.value)">
-          <input class="num" type="number" inputmode="numeric" placeholder="reps" value="${esc(s.reps)}" oninput="setSetVal(${i},${j},'reps',this.value)">
+          <input class="num" type="number" inputmode="decimal" step="any" placeholder="reps" value="${esc(s.reps)}" oninput="setSetVal(${i},${j},'reps',this.value)">
           <button class="icon" onclick="delSet(${i},${j})" ${d.sets.length===1?"disabled":""}>🗑</button>
         </div>`;
       });
@@ -672,7 +681,7 @@ function historyHTML(){
   if(!D.sessions.length) return "";
   let h = `<div style="margin-top:24px"><div class="eyebrow" style="color:var(--dimmer)">History</div><div class="card" style="margin-top:8px">`;
   D.sessions.slice(0,12).forEach(s=>{
-    const detail = s.workout==="C" ? cardioText(s) : `${(s.exercises||[]).length} lifts`;
+    const detail = s.workout==="C" ? dayDetail(s) : `${(s.exercises||[]).length} lifts`;
     h += `<div class="list-row">
       <button class="tap" onclick="jumpTo('${s.date}','${s.workout}')">
         ${dow(s.date)} ${shortD(s.date)} · <span style="color:var(--dimmer)">${esc(wLabel(s.workout))}</span>
@@ -688,7 +697,7 @@ function historyHTML(){
 function viewPlan(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   let h = `<div class="eyebrow">The plan</div><h2>Workout templates</h2>
-    <p class="sub">Build as many templates as you like. Sets and reps live here; weight gets logged per session. Cardio needs no template.</p>
+    <p class="sub">Build as many templates as you like. Sets and reps live here; weight gets logged per session. Steps need no template.</p>
     <div style="height:16px"></div>`;
   if(stale) h += `<div class="warn">${D.lastBackup ? `Last backup: ${ago(D.lastBackup)} days ago.` : "No backup yet."} Export one from the Backup tab.</div>`;
 
@@ -928,7 +937,7 @@ function dayTotals(ds){
   }, {cal:0,protein:0,carb:0,fat:0});
 }
 function dietDots(ds){
-  return (NUT().log[ds] && NUT().log[ds].length) ? `<span class="dot" style="background:var(--cardio)"></span>` : "";
+  return (NUT().log[ds] && NUT().log[ds].length) ? `<span class="dot" style="background:var(--steps)"></span>` : "";
 }
 
 function macroRow(label, consumed, shown, min, max, color){
@@ -1004,7 +1013,7 @@ function dietDay(){
     </div>
     <div class="kcal">${calHead}</div>
     <div class="bar">
-      <div style="width:${calFill}%;background:${calOk?'var(--good)':'var(--cardio)'}"></div>
+      <div style="width:${calFill}%;background:${calOk?'var(--good)':'var(--steps)'}"></div>
       <span class="tick" style="left:${calMinPct}%"></span>
       <span class="tick" style="left:${calMaxPct}%"></span>
     </div>
@@ -1137,7 +1146,7 @@ function dietFoods(){
       <span class="sub">per</span>
       <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="${sr.grams!=null?esc(sr.grams):"100"}">
       <select id="nfUnit" onchange="onNewFoodUnit(this.value)">
-        <option value="g">g</option><option value="ml">ml</option><option value="ct">ct (count)</option>
+        <option value="g">g</option><option value="ml">ml</option><option value="ct">ct</option>
       </select>
     </div>
     <div class="macros">
@@ -1168,7 +1177,7 @@ function dietFoods(){
         <select onchange="editFood('${f.id}','refUnit',this.value)">
           <option value="g" ${u==="g"?"selected":""}>g</option>
           <option value="ml" ${u==="ml"?"selected":""}>ml</option>
-          <option value="ct" ${u==="ct"?"selected":""}>ct (count)</option>
+          <option value="ct" ${u==="ct"?"selected":""}>ct</option>
         </select>
       </div>
       <div class="macros">
@@ -1464,17 +1473,18 @@ function buildCoachContext(hist){
     L.push("Per-exercise progression (first → latest):");
     Object.keys(byEx).forEach(name=>{
       const arr = byEx[name], f = arr[0].e, l = arr[arr.length-1].e;
-      const fmt = e => `${fmtNum(Math.round(meanOf(e.sets,"weight")*10)/10)}lb×${(e.sets||[]).length}×${Math.round(meanOf(e.sets,"reps"))} vol ${round(exVolume(e))}`;
+      const fmt = e => `${fmtNum(Math.round(meanOf(e.sets,"weight")*10)/10)}lb×${(e.sets||[]).length}×${fmtNum(Math.round(meanOf(e.sets,"reps")*10)/10)} vol ${round(exVolume(e))}`;
       L.push(`  ${name}: done ${arr.length}× | ${arr[0].date} ${fmt(f)} → ${arr[arr.length-1].date} ${fmt(l)}`);
     });
     const recent = sess.filter(s => (today0 - pd(s.date).getTime())/864e5 <= 14);
     L.push("Recent sessions (last 14 days):");
     if(recent.length) recent.forEach(s=>{
-      if(s.workout==="C") L.push(`  ${s.date} Cardio: ${cardioText(s)}`);
+      if(s.workout==="C") L.push(`  ${s.date} Steps: ${dayDetail(s)}`);
       else L.push(`  ${s.date} ${wLabel(s.workout)}: ` + (s.exercises||[]).map(e=>`${e.name} vol ${round(exVolume(e))}`).join("; "));
     }); else L.push("  (none)");
-    const cardioN = sess.filter(s=>s.workout==="C").length;
-    if(cardioN) L.push(`Total cardio sessions: ${cardioN}.`);
+    const a7 = stepsAvg(7), a28 = stepsAvg(28);
+    if(a7)  L.push(`Steps: 7-day average ${a7.avg} across ${a7.days} logged day(s).`);
+    if(a28) L.push(`Steps: 28-day average ${a28.avg} across ${a28.days} logged day(s). Days with no entry are not counted, so treat coverage as partial.`);
   } else L.push("No training logged.");
 
   return L.join("\n");
@@ -1720,7 +1730,7 @@ function rowHintInner(d, prev){
   const lastVol = exVolume(prev);
   const curVol = exVolume(d);
   const mw = fmtNum(Math.round(meanOf(prev.sets,"weight")*10)/10);   // mean weight (1 dp)
-  const mr = Math.round(meanOf(prev.sets,"reps"));                    // mean reps
+  const mr = fmtNum(Math.round(meanOf(prev.sets,"reps")*10)/10);      // mean reps (1 dp)
   let s = `last: ${mw} lb · ${(prev.sets||[]).length}×${mr} · vol ${round(lastVol)}`;
   if(curVol > 0){
     const cls = curVol > lastVol ? "up" : (curVol < lastVol ? "down" : "");
@@ -1746,7 +1756,7 @@ function setExName(i,v){
 }
 function addSet(i){ draft[i].sets.push({weight:"",reps:""}); justSaved=false; writeScratch(); render(); }
 function delSet(i,j){ if(draft[i].sets.length>1){ draft[i].sets.splice(j,1); justSaved=false; writeScratch(); render(); } }
-function setCardio(f,v){ cardioDraft[f]=v; justSaved=false; }
+function setSteps(v){ stepsDraft = v; justSaved=false; }
 function addLift(){
   const row = withUid({ name:"", sets:[{weight:"",reps:""},{weight:"",reps:""},{weight:"",reps:""}] });
   draft.push(row); openEx[row._uid] = true; justSaved=false; writeScratch(); render();
@@ -1771,11 +1781,13 @@ function saveSession(){
   save(); justSaved=true; render();
 }
 
-function saveCardio(){
-  const m = cardioDraft.minutes, mi = cardioDraft.miles;
-  if(!m && !mi){ err="Enter minutes or miles — either one is enough."; render(); return; }
-  D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout==="C")),
-                { date:trainDate, workout:"C", cardio:{ minutes:m, miles:mi } }]
+function saveSteps(){
+  const n = parseFloat(stepsDraft);
+  if(!(n > 0)){ err="Enter a step count."; render(); return; }
+  const old = sessionOn(trainDate, "C") || {};
+  const rec = { date:trainDate, workout:"C", steps: Math.round(n) };
+  if(old.cardio) rec.cardio = old.cardio;          // keep anything logged under the old Cardio slot
+  D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout==="C")), rec]
                 .sort((a,b)=>b.date.localeCompare(a.date));
   save(); justSaved=true; render();
 }
