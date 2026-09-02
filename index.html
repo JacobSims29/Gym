@@ -1232,20 +1232,12 @@ function dietDay(){
 }
 
 // food ids logged most recently, newest first — quick picks once the library is big
-function recentFoodIds(n){
-  const log = NUT().log || {}, seen = [], have = new Set();
-  Object.keys(log).sort().reverse().forEach(ds => {
-    (log[ds]||[]).slice().reverse().forEach(e => {
-      if(e.foodId && !have.has(e.foodId)){ have.add(e.foodId); seen.push(e.foodId); }
-    });
-  });
-  return seen.slice(0, n);
-}
+function recentFoodIds(n){ return logStats().order.slice(0, n); }
 
 function addPicker(meal){
   const all = allFoods(), term = foodFilter.trim().toLowerCase();
   let h = `<div class="addbox">
-    <input type="text" id="dietFilter" placeholder="Filter your foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
+    <input type="text" id="dietFilter" placeholder="Search foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
   let foods = [], heading = "";
   if(!all.length){
     h += `<p class="sub" style="margin-top:8px">${libState==="loading" ? "Loading the food library…" : "No foods yet. Add some on the Foods tab first."}</p>`;
@@ -1257,7 +1249,7 @@ function addPicker(meal){
     else if(all.length <= 30) foods = all.slice(0,20);
     else h += `<p class="sub" style="margin-top:8px">Type to search your ${all.length} foods.</p>`;
   } else {
-    foods = all.filter(f => f._n.includes(term)).slice(0,20);
+    foods = searchFoods(term, 20).list;
     if(!foods.length) h += `<p class="sub" style="margin-top:8px">No matches.</p>`;
   }
   if(heading) h += `<div class="eyebrow" style="color:var(--dimmer);margin:10px 2px 2px">${heading}</div>`;
@@ -1328,6 +1320,33 @@ const SEED_URL = "starter-foods.json";
 const FOOD_RESULTS = 25;              // max food cards rendered for one search
 
 const normName = s => String(s||"").trim().toLowerCase();
+
+/* ---- search ------------------------------------------------------------
+   Plain substring matching fails the obvious cases: "eggs" does not occur in
+   "egg omelet or scrambled egg", and an alphabetical list truncated at 25 hides
+   whatever sorts late. So each name is reduced once, at load, to a bag of
+   crudely singularised tokens joined with spaces and padded at both ends —
+   " egg omelet or scrambled egg ". A word-prefix test is then a plain indexOf
+   of " " + token, which native code does far faster than any loop here, and the
+   offset it returns doubles as a position score.                            */
+const TOKEN = /[a-z0-9]+/g;
+function singular(w){
+  if(w.length > 4 && w.endsWith("ies")) return w.slice(0,-3) + "y";
+  if(w.length > 4 && /(s|x|z|ch|sh)es$/.test(w)) return w.slice(0,-2);
+  if(w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0,-1);
+  return w;
+}
+function tokenize(str){
+  const raw = String(str||"").toLowerCase().match(TOKEN) || [];
+  const out = [];
+  for(const w of raw){ if(w !== "generic") out.push(singular(w)); }
+  return out;
+}
+const searchBlob = name => " " + tokenize(name).join(" ") + " ";
+// the unstemmed words too: "eggs" and "egg" stem alike, but someone typing the
+// plural usually wants the dish ("scrambled eggs") over the compound ("egg roll"),
+// and someone typing the singular usually wants the reverse
+const rawBlob = name => " " + (String(name||"").toLowerCase().match(TOKEN)||[]).join(" ") + " ";
 // "Generic chicken breast" files under C, not G — otherwise the whole library
 // collapses into one letter and the alphabetical list stops being useful
 const sortKey = f => String(f.name||"").replace(/^generic\s+/i, "").toLowerCase();
@@ -1343,6 +1362,17 @@ function libId(name){
   return "lib:" + (h>>>0).toString(36);
 }
 
+// derived fields used by sorting and search; computed once, never saved
+function decorate(f){
+  f._n = normName(f.name);
+  f._k = sortKey(f);
+  f._s = searchBlob(f.name);
+  f._r = rawBlob(f.name);
+  f._c = (f._s.trim() ? f._s.trim().split(" ").length : 0);   // how many words the name spends
+  f._g = /^generic\s/i.test(f.name || "");
+  return f;
+}
+
 function buildLib(rows){
   const out = [], taken = new Set();
   rows.forEach(r => {
@@ -1353,7 +1383,7 @@ function buildLib(rows){
     taken.add(id);
     const f = { id, name:String(name), amount:+amount||100, refUnit:unit||"g",
                 cal:+cal||0, protein:+protein||0, carb:+carb||0, fiber:+fiber||0, fat:+fat||0 };
-    f._n = normName(f.name); f._k = sortKey(f);       // precomputed so search doesn't redo it per keystroke
+    decorate(f);
     out.push(f);
   });
   out.sort((a,b)=>a._k.localeCompare(b._k));
@@ -1415,6 +1445,7 @@ function reconcileSeeds(){
     const to = remap.get(e.foodId);
     if(to) e.foodId = to;                             // pointer only; qty, name and rates stay put
   }));
+  invalidateLogStats();
   n.foods = n.foods.filter(f => !remap.has(f.id));
   invalidateFoods(); save();
   return remap.size;
@@ -1428,15 +1459,89 @@ let foodsCache = null;
 function invalidateFoods(){ foodsCache = null; }
 function allFoods(){
   if(foodsCache) return foodsCache;
-  const mine = (NUT().foods||[]).map(f => {
-    const c = Object.assign({}, f); c._n = normName(f.name); c._k = sortKey(f); c._mine = true; return c;
-  });
+  const mine = (NUT().foods||[]).map(f => { const c = decorate(Object.assign({}, f)); c._mine = true; return c; });
+  mine.sort((a,b)=>a._k.localeCompare(b._k));
   const shadow = new Set(NUT().hidden||[]);
   const names = new Set();
   mine.forEach(f => { shadow.add(f.id); names.add(f._n); });
-  const rest = LIB.filter(f => !shadow.has(f.id) && !names.has(f._n));
-  foodsCache = mine.concat(rest).sort((a,b)=>a._k.localeCompare(b._k));
-  return foodsCache;
+  // both inputs are already sorted, so merge them: n comparisons rather than the
+  // n log n a re-sort costs, which matters because this runs on every food edit
+  const out = [];
+  let i = 0, j = 0;
+  while(i < mine.length || j < LIB.length){
+    if(j < LIB.length && (shadow.has(LIB[j].id) || names.has(LIB[j]._n))){ j++; continue; }
+    if(i >= mine.length) out.push(LIB[j++]);
+    else if(j >= LIB.length) out.push(mine[i++]);
+    else out.push(mine[i]._k.localeCompare(LIB[j]._k) <= 0 ? mine[i++] : LIB[j++]);
+  }
+  foodsCache = out;
+  return out;
+}
+
+/* How often and how recently each food has been logged. Foods you actually eat
+   should outrank the rest of a 5,000-row library on any query they match. */
+let logStatsCache = null;
+function invalidateLogStats(){ logStatsCache = null; }
+function logStats(){
+  if(logStatsCache) return logStatsCache;
+  const w = new Map(), order = [], seen = new Set();
+  const log = NUT().log || {}, now = pd(today()).getTime();
+  Object.keys(log).sort().reverse().forEach(ds => {
+    const age = Math.max(0, (now - pd(ds).getTime())/864e5);
+    (log[ds]||[]).slice().reverse().forEach(e => {
+      if(!e.foodId) return;
+      if(!seen.has(e.foodId)){ seen.add(e.foodId); order.push(e.foodId); }
+      const bump = 1 + (age <= 14 ? 1.5 : age <= 60 ? 0.6 : 0);
+      w.set(e.foodId, (w.get(e.foodId)||0) + bump);
+    });
+  });
+  const score = new Map();
+  w.forEach((v,k) => score.set(k, Math.min(10, 3 + 2.2*Math.log2(1+v))));
+  logStatsCache = { score, order };
+  return logStatsCache;
+}
+
+// every query token must match the start of some word in the name
+function scoreFood(f, q, raw, phrase, st){
+  let s = 0, matched = 0;
+  for(let k = 0; k < q.length; k++){
+    const t = q[k];
+    const i = f._s.indexOf(" " + t);
+    if(i < 0) return null;                                  // every word must match something
+    s += (f._s.indexOf(" " + t + " ") >= 0) ? 14 : 5;        // a whole word beats a prefix by a wide margin,
+    s += i === 0 ? 3 : (i < 14 ? 2 : 0);                    // so "egg" outranks "eggplant" and "Eggo"
+    if(f._r.indexOf(" " + raw[k] + " ") >= 0) s += 4;        // exact word as typed, plural and all
+    matched++;
+  }
+  if(q.length > 1 && f._s.indexOf(" " + phrase) >= 0) s += 8;   // the words appeared together, in order
+  s += 4 / (1 + Math.max(0, f._c - matched));                  // a name that says little else
+  s -= 0.05 * (f.name||"").length;
+  if(f._mine) s += 6;
+  if(f._g) s += 2;
+  s += st.score.get(f.id) || 0;
+  return s;
+}
+
+function searchFoods(term, limit){
+  const q = tokenize(term);
+  if(!q.length) return { total:0, list:[] };
+  const raw = (String(term||"").toLowerCase().match(TOKEN) || []).filter(w => w !== "generic");
+  while(raw.length < q.length) raw.push(q[raw.length]);
+  const phrase = q.join(" ");
+  const all = allFoods(), st = logStats(), hits = [];
+  for(let i = 0; i < all.length; i++){
+    const sc = scoreFood(all[i], q, raw, phrase, st);
+    if(sc !== null) hits.push([sc, all[i]]);
+  }
+  if(!hits.length){
+    // nothing matched on word boundaries — fall back to a plain substring pass
+    const t = term.trim().toLowerCase();
+    for(let i = 0; i < all.length && hits.length < limit*4; i++){
+      if(all[i]._n.indexOf(t) >= 0) hits.push([0, all[i]]);
+    }
+  }
+  hits.sort((a,b) => b[0]-a[0] || a[1]._k.localeCompare(b[1]._k));
+  return { total: hits.length, list: hits.slice(0, limit).map(h => h[1]) };
 }
 function foodById(id){
   return (NUT().foods||[]).find(f=>f.id===id) || LIB_BY_ID.get(id) || null;
@@ -1474,7 +1579,7 @@ function libraryCard(){
                : "not loaded";
   let h = `<div class="card">
     <div class="lift"><h3>Food library</h3><span class="last">${status}</span></div>
-    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. Editing one saves your version; deleting one hides it.</p>
+    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. Editing one saves your version; deleting one hides it. Row-by-row sourcing sits in <span class="mono">starter-foods-provenance.json</span>, which the app never loads.</p>
     <div class="sub" style="margin-bottom:10px">Your own foods: ${mineCount}${seeds ? ` · ${seeds} saved copies from the old import` : ""}${hid ? ` · ${hid} hidden` : ""}</div>
     <button class="ghost" ${libState==="loading"?"disabled":""} onclick="loadLibrary(true)">${libState==="loading"?"Loading…":"Reload library"}</button>`;
   if(seeds) h += `<button class="ghost" style="margin-top:8px" onclick="pruneSeedCopies()">Drop saved copies the library already provides</button>`;
@@ -1526,12 +1631,11 @@ function dietFoods(){
   } else if(!term){
     h += `<p class="sub" style="text-align:center;padding:8px 0">Type to find a food. ${total} available.</p>`;
   } else {
-    list = merged.filter(f => f._n.includes(term));
+    const res = searchFoods(foodSearch, FOOD_RESULTS);
+    list = res.list;
     if(!list.length) h += `<p class="sub">No foods match “${esc(foodSearch)}”.</p>`;
-    else if(list.length > FOOD_RESULTS){
-      h += `<p class="sub">${list.length} matches — showing the first ${FOOD_RESULTS}. Keep typing to narrow it.</p>`;
-      list = list.slice(0, FOOD_RESULTS);
-    }
+    else if(res.total > FOOD_RESULTS)
+      h += `<p class="sub">${res.total} matches — showing the ${FOOD_RESULTS} closest. Keep typing to narrow it.</p>`;
   }
   list.forEach(f=>{
     const u = f.refUnit || "g";
@@ -1599,7 +1703,7 @@ function copyYesterdayMeal(meal){
     NUT().log[dietDate].push({ ...e, id:"e"+Date.now()+"_"+k });
   });
   mealCollapsed[meal] = false;
-  save(); render();
+  invalidateLogStats(); save(); render();
 }
 function cancelAdd(){ addingMeal=null; render(); }
 function setFoodFilter(v){ foodFilter=v; render(); }
@@ -2029,7 +2133,7 @@ function addEntry(meal, foodId){
   const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:(food.amount||100), unit:base, per:perBase(food) };
   if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
   NUT().log[dietDate].push(entry);
-  save(); render();
+  invalidateLogStats(); save(); render();
 }
 function findEntry(id){
   const list = NUT().log[dietDate] || [];
@@ -2040,7 +2144,7 @@ function setEntryUnit(id,v){ const e=findEntry(id); if(e){ e.unit=v; save(); ren
 function delEntry(id){
   NUT().log[dietDate] = (NUT().log[dietDate]||[]).filter(e=>e.id!==id);
   if(!NUT().log[dietDate].length) delete NUT().log[dietDate];
-  save(); render();
+  invalidateLogStats(); save(); render();
 }
 
 // switching the new-food unit swaps the placeholder amount (1 for ct, 100 for g/ml)
@@ -2262,7 +2366,7 @@ async function importAll(e){
 
     const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
     D = upgraded;
-    save(); saveScratch(); invalidateFoods(); ensureSelection(); seedDraft();
+    save(); saveScratch(); invalidateFoods(); invalidateLogStats(); ensureSelection(); seedDraft();
     note = v < SCHEMA
       ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.`
       : "Restored from backup.";
