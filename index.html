@@ -13,7 +13,7 @@
   :root{
     --bg:#0a0a0a; --card:#171717; --line:#262626; --line2:#404040;
     --text:#f5f5f5; --dim:#a3a3a3; --dimmer:#525252;
-    --accent:#fbbf24; --good:#34d399; --bad:#f87171; --cardio:#60a5fa;
+    --accent:#fbbf24; --good:#34d399; --bad:#f87171; --steps:#60a5fa;
   }
   body{
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -56,7 +56,7 @@
   .seg{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px}
   .seg button{border:1px solid var(--line);background:var(--card);color:var(--dimmer);padding:12px 4px;font-size:14px}
   .seg button.on{border-color:var(--accent);background:#262626;color:var(--text)}
-  .seg button.on.cardio{border-color:var(--cardio)}
+  .seg button.on.steps{border-color:var(--steps)}
 
   .nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);
     display:grid;grid-template-columns:repeat(6,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:30}
@@ -76,6 +76,11 @@
   .bar{height:10px;border-radius:5px;background:var(--bg);overflow:hidden;margin:10px 0;position:relative}
   .bar>div{height:100%;border-radius:5px}
   .macro{margin-top:12px}
+  .macro.sub{margin-top:6px;margin-left:14px;padding-left:10px;border-left:2px solid var(--line)}
+  .macro.sub .top{font-size:12px;color:var(--dim)}
+  .macro.sub .val{font-size:12px}
+  .macro.sub .mbar{height:4px;border-radius:2px}
+  .macro.sub .tick{opacity:.45}
   .macro .top{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px}
   .macro .val{font-size:13px}
   .mbar{height:6px;border-radius:3px;background:var(--bg);overflow:hidden;position:relative}
@@ -100,9 +105,9 @@
   .qty input{width:70px;padding:8px;text-align:center}
   .qty select{width:auto;padding:8px;background:var(--bg);border:1px solid var(--line2);border-radius:6px;color:var(--text);font-size:14px}
   .foodcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:10px}
-  .foodcard .macros{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+  .foodcard .macros{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:8px}
   .foodcard .macros label{font-size:10px;color:var(--dimmer);display:block;text-align:center;margin-bottom:2px}
-  .foodcard .macros input{padding:8px 4px;text-align:center;font-size:14px}
+  .foodcard .macros input{padding:8px 2px;text-align:center;font-size:13px}
 
   .lift{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
   .lift h3{font-size:16px;font-weight:600}
@@ -143,7 +148,7 @@
   .cd.sel{background:var(--accent);color:#0a0a0a;font-weight:700}
   .dots{display:flex;gap:2px;height:4px;margin-top:2px}
   .dot{width:4px;height:4px;border-radius:50%;background:var(--accent)}
-  .dot.c{background:var(--cardio)}
+  .dot.c{background:var(--steps)}
   .cd.sel .dot{background:#0a0a0a}
 
   .list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 4px;
@@ -222,15 +227,19 @@ let aiModel = "haiku";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 9;   // bump whenever the saved data shape changes, and add a migration below
-const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80 };
+const SCHEMA = 12;  // bump whenever the saved data shape changes, and add a migration below
+const SCRATCH_KEY = "gymlog.scratch.v1";   // the hot path: rewritten while you type a set, kept out of the main blob
+const LIB_KEY = "gymlog.lib.v1";           // offline mirror of starter-foods.json; never inside D or a backup
+const SAVE_DEBOUNCE = 500;                 // ms — coalesce keystroke writes
+const LIB_MIRROR_MAX = 400000;             // don't mirror a library larger than this; fall back to the HTTP cache
+const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80, fbMin:25, fbMax:40 };
 const EMPTY = {
   schema:SCHEMA,
   templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}],
   sessions:[], weights:[], photos:[], lastBackup:null,
   scratch:{},
-  coach:{ goals:"", lastRun:null, current:null },
-  nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{} }
+  coach:{ goals:"", lastRun:null, current:null, history:[] },
+  nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{}, hidden:[] }
 };
 
 let D = structuredClone(EMPTY);
@@ -327,6 +336,55 @@ const MIGRATIONS = {
   8(d){
     if(!d.coach) d.coach = { goals:"", lastRun:null, current:null };
     return d;
+  },
+  // 9 → 10: coach keeps an archive of past analyses so it can reference them later
+  9(d){
+    if(!d.coach) d.coach = { goals:"", lastRun:null, current:null };
+    if(!Array.isArray(d.coach.history)) d.coach.history = [];
+    return d;
+  },
+  // 10 → 11: fiber tracked as a component of carbs — target range, per-food value,
+  // and a `fiber` rate backfilled onto every already-logged entry
+  10(d){
+    const n = d.nutrition;
+    if(!n) return d;
+    if(n.targets){
+      if(n.targets.fbMin == null) n.targets.fbMin = 25;
+      if(n.targets.fbMax == null) n.targets.fbMax = 40;
+    }
+    (n.foods||[]).forEach(f => { if(f.fiber == null) f.fiber = 0; });
+    Object.keys(n.log||{}).forEach(ds => {
+      (n.log[ds]||[]).forEach(e => {
+        if(!e.per) return;
+        if(e.per.fiber == null){
+          // recover the rate from the source food if it still exists, else 0
+          const f = (n.foods||[]).find(x => x.id === e.foodId);
+          const a = f ? (parseFloat(f.amount)||1) : 1;
+          e.per.fiber = f ? (parseFloat(f.fiber)||0)/a : 0;
+        }
+      });
+    });
+    return d;
+  },
+  // 11 -> 12: the starter library moved out of saved data. `foods` now holds only what
+  // you created or edited; the shipped library is fetched into memory at startup and
+  // merged in for display. `hidden` records library foods you deleted so they stay gone.
+  // Log entries also shed `base` (recoverable from `unit`) and store their `per` rates as
+  // a fixed-order [cal, protein, carb, fiber, fat] array rounded to six significant
+  // figures — the same numbers to 1 part in 10^6, about a third fewer bytes per entry.
+  // Nothing is removed from `foods` here: that needs the library, which loads later, so
+  // reconcileSeeds() does it once the file lands.
+  11(d){
+    const n = d.nutrition;
+    if(!n) return d;
+    if(!Array.isArray(n.hidden)) n.hidden = [];
+    Object.keys(n.log||{}).forEach(ds => {
+      (n.log[ds]||[]).forEach(e => {
+        if(e.per && !Array.isArray(e.per)) e.per = toPer(e.per);
+        if(e.base && e.unit && baseOf(e.unit) === e.base) delete e.base;
+      });
+    });
+    return d;
   }
 };
 
@@ -343,20 +401,44 @@ function migrate(raw){
     v++;
   }
   d.schema = SCHEMA;
+  if(d.nutrition && !Array.isArray(d.nutrition.hidden)) d.nutrition.hidden = [];
   return d;
 }
 
-/* ============ storage ============ */
+/* ============ storage ============
+   D is serialised whole on every save, so anything that grows without bound has to
+   live outside it. Two things did: the in-progress set entry, which is rewritten on
+   every keystroke, and the food library, which is 500 rows today and could be 50,000.
+   Both now have their own keys. What is left in D is written at most once per
+   SAVE_DEBOUNCE ms and is dominated by the diet log, which grows a few KB a day.  */
+let scratchTimer = null;
+
 function save(){
   try{ D.schema = SCHEMA; localStorage.setItem(KEY, JSON.stringify(D)); err=""; }
   catch(e){ err="Storage is full — export a backup to be safe."; }
 }
+// the unsaved-entry store, ~1 KB, written on its own instead of dragging all of D along
+function saveScratch(){
+  if(scratchTimer){ clearTimeout(scratchTimer); scratchTimer = null; }
+  try{ localStorage.setItem(SCRATCH_KEY, JSON.stringify(D.scratch||{})); }catch(e){}
+}
+function saveScratchSoon(){
+  if(scratchTimer) return;                                     // trailing edge: one write per burst
+  scratchTimer = setTimeout(()=>{ scratchTimer = null; saveScratch(); }, SAVE_DEBOUNCE);
+}
+// iOS suspends a backgrounded web app without warning, so commit anything pending
+function flushPending(){ if(scratchTimer) saveScratch(); }
+
 function load(){
   try{
     const raw = localStorage.getItem(KEY);
-    if(!raw) return;
-    D = migrate(JSON.parse(raw));
-    save();                       // write the upgraded shape back
+    if(raw) D = migrate(JSON.parse(raw));
+    // a backup still carries scratch inside D; the standalone key is the fresher copy
+    try{
+      const sc = localStorage.getItem(SCRATCH_KEY);
+      if(sc){ const o = JSON.parse(sc); if(o && typeof o === "object") D.scratch = o; }
+    }catch(e){}
+    if(raw) save();               // write the upgraded shape back
   }catch(e){
     err = e instanceof NewerData
       ? `This data was written by a newer version of the app (v${e.message}). Update the app before using it — nothing has been overwritten.`
@@ -448,18 +530,18 @@ document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState 
 
 /* ============ train state ============ */
 let trainDate = today();
-let trainWorkout = "A";          // a template id, or "C" for cardio
+let trainWorkout = "A";          // a template id, or "C" for the Steps slot
 let planWhich = "A";             // template id being edited on the Plan tab
 let draft = [];                  // ordered rows for the day being edited
 let openEx = {};                 // exercise _uid -> expanded in Train
-let cardioDraft = { minutes:"", miles:"" };
+let stepsDraft = "";             // the Steps slot reuses workout tag "C"
 let justSaved = false;
 let calOpen = false;
 let calMonth = new Date();       // any date inside the shown month
 
-const isCardio = w => w === "C";
+const isSteps = w => w === "C";   // tag kept as "C" so pre-Steps sessions stay addressable
 const tpl = id => D.templates.find(t => t.id === id);
-const wLabel = w => w==="C" ? "Cardio" : (tpl(w) ? tpl(w).name : "Workout");
+const wLabel = w => w==="C" ? "Steps" : (tpl(w) ? tpl(w).name : "Workout");
 const firstTemplateId = () => (D.templates[0] && D.templates[0].id) || "C";
 
 // keep the two selections pointing at something that still exists
@@ -486,16 +568,28 @@ function lastLiftBefore(name, date){
 function exVolume(e){
   return (e.sets||[]).reduce((v,s)=> v + (parseFloat(s.weight)||0)*(parseFloat(s.reps)||0), 0);
 }
-function lastCardio(){
-  const c = [...D.sessions].filter(s=>s.workout==="C").sort((a,b)=>a.date.localeCompare(b.date));
+// most recent day with a step count (skips pre-Steps cardio-only records)
+function lastSteps(){
+  const c = D.sessions.filter(s => s.workout==="C" && s.date!==trainDate && s.steps!=null && s.steps!=="")
+                      .sort((a,b)=>a.date.localeCompare(b.date));
   return c.length ? c[c.length-1] : null;
 }
-function cardioText(s){
+// mean daily steps over the trailing n days, counting only days that were logged
+function stepsAvg(n){
+  const cut = pd(today()).getTime() - n*864e5;
+  const v = D.sessions.filter(s => s.workout==="C" && pd(s.date).getTime() >= cut)
+                      .map(s => parseFloat(s.steps)||0).filter(x => x > 0);
+  return v.length ? { avg: Math.round(v.reduce((a,b)=>a+b,0)/v.length), days: v.length } : null;
+}
+// legacy minutes/miles from the old Cardio slot — still shown so nothing looks deleted
+function dayDetail(s){
   const p = [];
+  if(s.steps!=null && s.steps!=="") p.push(commas(Math.round(parseFloat(s.steps)||0)) + " steps");
   if(s.cardio && s.cardio.minutes) p.push(s.cardio.minutes+" min");
   if(s.cardio && s.cardio.miles) p.push(s.cardio.miles+" mi");
   return p.join(" · ") || "logged";
 }
+const commas = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 let uidCounter = 0;
 const scratchKey = () => trainDate + "|" + trainWorkout;
@@ -503,11 +597,8 @@ function withUid(e){ return { _uid: ++uidCounter, name:e.name, sets:(e.sets||[])
 
 function seedDraft(){
   const ex = sessionOn(trainDate, trainWorkout);
-  if(isCardio(trainWorkout)){
-    cardioDraft = {
-      minutes: ex && ex.cardio ? (ex.cardio.minutes||"") : "",
-      miles:   ex && ex.cardio ? (ex.cardio.miles||"")   : ""
-    };
+  if(isSteps(trainWorkout)){
+    stepsDraft = ex && ex.steps!=null ? String(ex.steps) : "";
     justSaved = false;
     return;
   }
@@ -529,10 +620,12 @@ function seedDraft(){
   justSaved = false;
 }
 
+// Called on every keystroke in a set field. In-memory state updates immediately;
+// the write is ~1 KB to its own key and debounced, instead of re-serialising all of D.
 function writeScratch(){
   if(!D.scratch) D.scratch = {};
   D.scratch[scratchKey()] = draft.map(e => ({ name:e.name, sets:e.sets.map(s=>({weight:s.weight,reps:s.reps})) }));
-  save();
+  saveScratchSoon();
 }
 
 /* ============ calendar (shared) ============ */
@@ -572,13 +665,13 @@ function viewTrain(){
 
   let h = `
   <div class="hdr">
-    <button class="arrow" onclick="shiftDay(-1)">‹</button>
+    <button class="arrow" onclick="${calOpen?"shiftMonth(-1)":"shiftDay(-1)"}">‹</button>
     <div class="mid" onclick="toggleCal()">
-      <div class="eyebrow">Week ${wk(trainDate)} · ${dow(trainDate)}</div>
+      <div class="eyebrow">${calOpen ? `${MONTHS[calMonth.getMonth()]} ${calMonth.getFullYear()}` : `Week ${wk(trainDate)} · ${dow(trainDate)}`}</div>
       <h2>${shortD(trainDate)}</h2>
       <div class="caret">${calOpen ? "▲ close calendar" : "▼ pick a date"}</div>
     </div>
-    <button class="arrow" onclick="shiftDay(1)">›</button>
+    <button class="arrow" onclick="${calOpen?"shiftMonth(1)":"shiftDay(1)"}">›</button>
   </div>`;
 
   if(calOpen) h += calendarHTML();
@@ -586,28 +679,28 @@ function viewTrain(){
   h += `<div class="seg">
     ${[...D.templates.map(t=>t.id), "C"].map(w=>{
       const done = sessionOn(trainDate,w);
-      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"cardio":""}" onclick="pickWorkout('${w}')">${esc(wLabel(w))}${done?' <span class="up">✓</span>':""}</button>`;
+      return `<button class="${trainWorkout===w?"on":""} ${w==="C"?"steps":""}" onclick="pickWorkout('${w}')">${esc(wLabel(w))}${done?' <span class="up">✓</span>':""}</button>`;
     }).join("")}
   </div>`;
 
-  if(isCardio(trainWorkout)){
-    const prev = lastCardio();
+  if(isSteps(trainWorkout)){
+    const prev = lastSteps();
+    const a7 = stepsAvg(7), a28 = stepsAvg(28);
+    const legacy = existing && existing.cardio && (existing.cardio.minutes || existing.cardio.miles);
     h += `
     <div class="card">
       <div class="lift">
-        <h3>Walk / Run</h3>
-        <span class="last">${prev ? `last: ${cardioText(prev)} (${shortD(prev.date)})` : "first time"}</span>
+        <h3>Steps</h3>
+        <span class="last">${prev ? `last: ${commas(Math.round(parseFloat(prev.steps)||0))} (${shortD(prev.date)})` : "first time"}</span>
       </div>
-      <div class="row" style="margin-bottom:8px">
-        <input class="num grow" type="number" inputmode="decimal" placeholder="minutes"
-          value="${esc(cardioDraft.minutes)}" oninput="setCardio('minutes',this.value)">
-        <input class="num grow" type="number" inputmode="decimal" step="0.01" placeholder="miles"
-          value="${esc(cardioDraft.miles)}" oninput="setCardio('miles',this.value)">
-      </div>
-      <p class="sub">Fill in either one, or both.</p>
+      <input class="num grow" style="width:100%" type="number" inputmode="numeric" placeholder="steps today"
+        value="${esc(stepsDraft)}" oninput="setSteps(this.value)">
+      ${a7 ? `<p class="sub" style="margin-top:8px">7-day avg ${commas(a7.avg)} over ${a7.days} logged day${a7.days===1?"":"s"}${a28?` · 28-day avg ${commas(a28.avg)}`:""}</p>` : ""}
+      ${legacy ? `<p class="sub" style="margin-top:6px;color:var(--steps)">This day also has older cardio logged: ${esc(dayDetail({cardio:existing.cardio}))}. It is kept, not overwritten.</p>` : ""}
+      <p class="sub" style="margin-top:6px">Read the count off your phone's Health app and type it in — iOS doesn't expose Health data to web apps.</p>
     </div>
-    <button class="${justSaved?"saved":"primary"}" onclick="saveCardio()">
-      ${justSaved ? "✓ Saved" : existing ? "Update cardio" : "Save cardio"}
+    <button class="${justSaved?"saved":"primary"}" onclick="saveSteps()">
+      ${justSaved ? "✓ Saved" : existing ? "Update steps" : "Save steps"}
     </button>`;
     return h + historyHTML();
   }
@@ -639,7 +732,7 @@ function viewTrain(){
         h += `<div class="setrow">
           <span class="setnum">${j+1}</span>
           <input class="num" type="number" inputmode="decimal" placeholder="lb" value="${esc(s.weight)}" oninput="setSetVal(${i},${j},'weight',this.value)">
-          <input class="num" type="number" inputmode="numeric" placeholder="reps" value="${esc(s.reps)}" oninput="setSetVal(${i},${j},'reps',this.value)">
+          <input class="num" type="number" inputmode="decimal" step="any" placeholder="reps" value="${esc(s.reps)}" oninput="setSetVal(${i},${j},'reps',this.value)">
           <button class="icon" onclick="delSet(${i},${j})" ${d.sets.length===1?"disabled":""}>🗑</button>
         </div>`;
       });
@@ -666,7 +759,7 @@ function historyHTML(){
   if(!D.sessions.length) return "";
   let h = `<div style="margin-top:24px"><div class="eyebrow" style="color:var(--dimmer)">History</div><div class="card" style="margin-top:8px">`;
   D.sessions.slice(0,12).forEach(s=>{
-    const detail = s.workout==="C" ? cardioText(s) : `${(s.exercises||[]).length} lifts`;
+    const detail = s.workout==="C" ? dayDetail(s) : `${(s.exercises||[]).length} lifts`;
     h += `<div class="list-row">
       <button class="tap" onclick="jumpTo('${s.date}','${s.workout}')">
         ${dow(s.date)} ${shortD(s.date)} · <span style="color:var(--dimmer)">${esc(wLabel(s.workout))}</span>
@@ -682,7 +775,7 @@ function historyHTML(){
 function viewPlan(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   let h = `<div class="eyebrow">The plan</div><h2>Workout templates</h2>
-    <p class="sub">Build as many templates as you like. Sets and reps live here; weight gets logged per session. Cardio needs no template.</p>
+    <p class="sub">Build as many templates as you like. Sets and reps live here; weight gets logged per session. Steps need no template.</p>
     <div style="height:16px"></div>`;
   if(stale) h += `<div class="warn">${D.lastBackup ? `Last backup: ${ago(D.lastBackup)} days ago.` : "No backup yet."} Export one from the Backup tab.</div>`;
 
@@ -744,10 +837,17 @@ function chartSVG(){
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
   if(asc.length < 2) return `<p class="sub" style="text-align:center;padding:24px 0">Log two weigh-ins and the graph appears.</p>`;
 
-  // EWMA trend (denoised, continuous). alpha ~ 2/(N+1) with N≈10-day span.
-  const alpha = 0.25;
+  // EWMA trend, weighted by elapsed DAYS rather than by measurement index, so a
+  // gap between weigh-ins decays the old value the way real time would.
+  // alpha is per day: the previous trend keeps (1-alpha)^Δdays of its weight.
+  const alphaDay = 0.25;
   const trend = [];
-  asc.forEach((w,i)=>{ trend.push(i===0 ? w.value : alpha*w.value + (1-alpha)*trend[i-1]); });
+  asc.forEach((w,i)=>{
+    if(i===0){ trend.push(w.value); return; }
+    const gap = Math.max(1, (pd(w.date).getTime()-pd(asc[i-1].date).getTime())/864e5);
+    const a = 1 - Math.pow(1-alphaDay, gap);          // → 1 as the gap grows
+    trend.push(a*w.value + (1-a)*trend[i-1]);
+  });
 
   // lb/week from a linear fit over the trailing 4 weeks (falls back to all data if <2 points in window)
   const latest = pd(asc[asc.length-1].date).getTime();
@@ -765,13 +865,34 @@ function chartSVG(){
   const allV = [...asc.map(w=>w.value), ...trend];
   const min = Math.min(...allV)-1, max = Math.max(...allV)+1;
   const W=440,H=160,L=34,R=8,T=10,B=22;
-  const x = i => L + (i/(asc.length-1))*(W-L-R);
+
+  // x axis is elapsed time, so a gap between weigh-ins shows as a gap on the chart
+  const t0 = pd(asc[0].date).getTime();
+  const spanD = Math.max(1, (pd(asc[asc.length-1].date).getTime() - t0)/864e5);
+  const x = ds => L + (((pd(ds).getTime()-t0)/864e5)/spanD)*(W-L-R);
   const y = v => T + (1-(v-min)/(max-min))*(H-T-B);
+
   const grid = [max,(max+min)/2,min].map(v=>
     `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-R}" y2="${y(v).toFixed(1)}" stroke="#262626"/>
      <text x="0" y="${(y(v)+4).toFixed(1)}" fill="#525252" font-size="10" font-family="monospace">${v.toFixed(1)}</text>`).join("");
-  const dots = asc.map((w,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2" fill="#525252"/>`).join("");
-  const trendPts = trend.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+
+  // faint vertical rule + label at the first of each month inside the window
+  let ticks = "";
+  {
+    const end = pd(asc[asc.length-1].date);
+    let m = new Date(pd(asc[0].date).getFullYear(), pd(asc[0].date).getMonth()+1, 1);
+    while(m <= end){
+      const px = x(iso(m));
+      if(px > L+18 && px < W-R-18){
+        ticks += `<line x1="${px.toFixed(1)}" y1="${T}" x2="${px.toFixed(1)}" y2="${H-B}" stroke="#1f1f1f"/>
+          <text x="${px.toFixed(1)}" y="${H-4}" fill="#3f3f3f" font-size="9" text-anchor="middle">${MONTHS[m.getMonth()].slice(0,3)}</text>`;
+      }
+      m = new Date(m.getFullYear(), m.getMonth()+1, 1);
+    }
+  }
+
+  const dots = asc.map(w=>`<circle cx="${x(w.date).toFixed(1)}" cy="${y(w.value).toFixed(1)}" r="2" fill="#525252"/>`).join("");
+  const trendPts = trend.map((v,i)=>`${x(asc[i].date).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
 
   const slopeStr = (slopeWk>0?"+":"") + slopeWk.toFixed(2) + " lb/wk";
   const slopeColor = slopeWk < 0 ? "var(--good)" : (slopeWk > 0 ? "var(--dim)" : "var(--dimmer)");
@@ -783,12 +904,13 @@ function chartSVG(){
     </div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="170">
       ${grid}
+      ${ticks}
       ${dots}
       <polyline points="${trendPts}" fill="none" stroke="#fbbf24" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
       <text x="${L}" y="${H-4}" fill="#525252" font-size="10">${shortD(asc[0].date)}</text>
       <text x="${W-R}" y="${H-4}" fill="#525252" font-size="10" text-anchor="end">${shortD(asc[asc.length-1].date)}</text>
     </svg>
-    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend.</p>
+    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend. The x axis is calendar time (${Math.round(spanD)} days), so gaps between weigh-ins show as gaps.</p>
   </div>`;
 }
 function viewWeight(){
@@ -822,6 +944,50 @@ function viewWeight(){
 }
 
 /* ============ backup view ============ */
+/* What is actually on disk, and how fast it is filling up. Safari caps localStorage at
+   about 5 MB of text per origin; WebKit bills UTF-16, so the worst case is 2.5 M
+   characters. Counting characters and comparing against that lower bound is the
+   pessimistic reading, which is the one worth showing.                            */
+const STORAGE_BUDGET = 2.5*1048576;   // 2.5 M characters
+const kb = n => n < 1024 ? n + " B" : (n/1024).toFixed(n < 102400 ? 1 : 0) + " KB";
+
+function storageStats(){
+  const len = k => { try{ const v = localStorage.getItem(k); return v ? v.length : 0; }catch(e){ return 0; } };
+  const core = len(KEY), scratch = len(SCRATCH_KEY), lib = len(LIB_KEY);
+  const log = JSON.stringify(NUT().log||{}).length;
+  const sessions = JSON.stringify(D.sessions||[]).length;
+  const foods = JSON.stringify(NUT().foods||[]).length;
+
+  // growth rate measured over the span actually logged, not calendar days since install
+  const days = Object.keys(NUT().log||{}).filter(d=>dayEntries(d).length).sort();
+  const sdates = (D.sessions||[]).map(x=>x.date).sort();
+  const first = [days[0], sdates[0]].filter(Boolean).sort()[0];
+  const span = first ? Math.max(1, (pd(today()) - pd(first))/864e5) : 0;
+  const perDay = span ? (log + sessions) / span : 0;
+  const left = STORAGE_BUDGET - (core + scratch + lib);
+  return { core, scratch, lib, log, sessions, foods, total:core+scratch+lib, perDay,
+           years: perDay > 0 ? left / perDay / 365 : null };
+}
+
+function storageCard(){
+  const st = storageStats();
+  const pct = Math.min(100, st.total / STORAGE_BUDGET * 100);
+  const life = st.years == null ? "Not enough history yet to estimate a growth rate."
+    : st.years > 40 ? `Growing about ${kb(Math.round(st.perDay))} a day — effectively no limit at that rate.`
+    : `Growing about ${kb(Math.round(st.perDay))} a day, which reaches the budget in roughly ${st.years < 1 ? Math.round(st.years*12) + " months" : st.years.toFixed(1) + " years"}.`;
+  return `<div class="card">
+    <div class="lift"><h3>Storage</h3><span class="last">${(pct).toFixed(pct<1?2:1)}%</span></div>
+    <div class="bar" style="margin:10px 0 8px"><div style="width:${Math.max(pct,0.5)}%;background:var(--accent)"></div></div>
+    <div class="sub">${kb(st.total)} of a ${(STORAGE_BUDGET/1048576).toFixed(1)} MB budget</div>
+    <div class="sub" style="margin-top:8px;line-height:1.6">
+      diet log ${kb(st.log)} · training ${kb(st.sessions)} · your foods ${kb(st.foods)}<br>
+      library mirror ${kb(st.lib)} (outside your data) · in progress ${kb(st.scratch)}
+    </div>
+    <p class="sub" style="margin-top:8px;line-height:1.5">${life}</p>
+    <p class="sub" style="margin-top:8px;line-height:1.5;color:var(--dimmer)">Safari allows roughly 5 MB of text per site and may count each character as two bytes, so this compares against the pessimistic 2.5 MB. Exports are unaffected by the limit.</p>
+  </div>`;
+}
+
 function viewBackup(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   return `
@@ -841,14 +1007,35 @@ function viewBackup(){
     Export writes one JSON file holding every template, session, weigh-in, food, and diet day.
     In the share sheet choose Save to Files → iCloud Drive. Restoring replaces everything currently in the app.
   </p>
-  <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>`;
+  <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>
+  <div style="height:16px"></div>
+  ${storageCard()}`;
 }
 
 /* ============ diet ============ */
 const MEALS = ["Breakfast","Lunch","Dinner","Snacks"];
-const MASS = { g:1, oz:28.3495, lb:453.592 };                       // → grams
-const VOL  = { ml:1, tbsp:14.7868, "fl oz":29.5735, cup:236.588 };  // → millilitres
-const unitTable = base => base==="ml" ? VOL : MASS;
+const MASS  = { g:1, oz:28.3495, lb:453.592 };                       // → grams
+const VOL   = { ml:1, tbsp:14.7868, "fl oz":29.5735, cup:236.588 };  // → millilitres
+const COUNT = { ct:1 };                                              // whole items; no conversions
+const unitTable = base => base==="ml" ? VOL : (base==="ct" ? COUNT : MASS);
+// which table a unit belongs to — so entries no longer need to store `base` alongside
+const baseOf = u => VOL[u]!==undefined ? "ml" : (COUNT[u]!==undefined ? "ct" : "g");
+const eBase = e => e.base || baseOf(e.unit || "g");
+// per-unit rates are quotients, so they serialise as 0.028999999999999998 unless trimmed.
+// Six significant figures is ~0.0001% — far below the accuracy of any food label.
+const sig6 = n => { const x = +n || 0; return x ? +x.toPrecision(6) : 0; };
+// Each log entry stores its own rates, so they are the single biggest thing in saved
+// data. As of v12 they are a fixed-order array — same five numbers, no repeated keys.
+const PER = ["cal","protein","carb","fiber","fat"];
+const toPer = o => PER.map(k => sig6(o && o[k]));
+const rates = e => {
+  const p = e.per;
+  if(Array.isArray(p)) return { cal:p[0]||0, protein:p[1]||0, carb:p[2]||0, fiber:p[3]||0, fat:p[4]||0 };
+  return { cal:(p&&p.cal)||0, protein:(p&&p.protein)||0, carb:(p&&p.carb)||0, fiber:(p&&p.fiber)||0, fat:(p&&p.fat)||0 };
+};
+const UNIT_DEFAULT_AMOUNT = { g:100, ml:100, ct:1 };
+// "180g" / "250ml" / "2 ct" — count reads better with a space
+const unitLabel = (amount, u) => u==="ct" ? `${amount} ct` : `${amount}${u}`;
 
 let dietDate = today();
 let dietSub = "day";              // "day" | "foods" | "goals"
@@ -872,24 +1059,45 @@ const round = n => Math.round(n);
 // per-base-unit macros for a library food (nutrition stored for `amount` of `refUnit`)
 function perBase(food){
   const a = food.amount || 1;
-  return { cal:(+food.cal||0)/a, protein:(+food.protein||0)/a, carb:(+food.carb||0)/a, fat:(+food.fat||0)/a };
+  return PER.map(k => sig6((+food[k]||0)/a));
 }
 // base-unit quantity (grams or ml) for a log entry
-function entryBase(e){ const t = unitTable(e.base); return (+e.qty||0) * (t[e.unit]||1); }
+function entryBase(e){ const t = unitTable(eBase(e)); return (+e.qty||0) * (t[e.unit]||1); }
 // macro totals for a log entry (uses the snapshot taken when it was added)
 function entryMacros(e){
-  const b = entryBase(e), p = e.per || {cal:0,protein:0,carb:0,fat:0};
-  return { cal:b*p.cal, protein:b*p.protein, carb:b*p.carb, fat:b*p.fat };
+  const b = entryBase(e), p = rates(e);
+  return { cal:b*p.cal, protein:b*p.protein, carb:b*p.carb, fiber:b*p.fiber, fat:b*p.fat };
 }
 function dayEntries(ds){ return NUT().log[ds] || []; }
 function dayTotals(ds){
   return dayEntries(ds).reduce((t,e)=>{
     const m = entryMacros(e);
-    t.cal+=m.cal; t.protein+=m.protein; t.carb+=m.carb; t.fat+=m.fat; return t;
-  }, {cal:0,protein:0,carb:0,fat:0});
+    t.cal+=m.cal; t.protein+=m.protein; t.carb+=m.carb; t.fiber+=m.fiber; t.fat+=m.fat; return t;
+  }, {cal:0,protein:0,carb:0,fiber:0,fat:0});
 }
 function dietDots(ds){
-  return (NUT().log[ds] && NUT().log[ds].length) ? `<span class="dot" style="background:var(--cardio)"></span>` : "";
+  return (NUT().log[ds] && NUT().log[ds].length) ? `<span class="dot" style="background:var(--steps)"></span>` : "";
+}
+
+// A nested row for a component of the macro above it (fiber inside carbs).
+// It keeps its own scale so the goal ticks stay usable, but is indented, thinner
+// and dimmer, and states its share of the parent so the subset relation is explicit.
+function subRow(label, consumed, shown, min, max, parentTotal, color){
+  const scale = max>0 ? max*1.2 : 1;
+  const fillPct = Math.min(100, (consumed/scale)*100);
+  const minPct = (min/scale)*100, maxPct = (max/scale)*100;
+  const ok = consumed>=min && (max===0 || consumed<=max);
+  const share = parentTotal > 0 ? Math.round((consumed/parentTotal)*100) : null;
+  return `<div class="macro sub">
+    <div class="top"><span>${label}${share!=null?` <span style="color:var(--dimmer)">${share}% of carbs</span>`:""}</span>
+      <span class="val">${ok?'<span class="up">✓</span> ':''}<b>${round(shown)}</b> <span style="color:var(--dimmer)">/ ${min}-${max}g</span></span>
+    </div>
+    <div class="mbar">
+      <div style="width:${fillPct}%;background:${color}"></div>
+      <span class="tick" style="left:${minPct}%"></span>
+      <span class="tick" style="left:${maxPct}%"></span>
+    </div>
+  </div>`;
 }
 
 function macroRow(label, consumed, shown, min, max, color){
@@ -927,13 +1135,13 @@ function dietDay(){
 
   let h = `
   <div class="hdr">
-    <button class="arrow" onclick="shiftDietDay(-1)">‹</button>
+    <button class="arrow" onclick="${dietCalOpen?"shiftMonth(-1)":"shiftDietDay(-1)"}">‹</button>
     <div class="mid" onclick="toggleDietCal()">
-      <div class="eyebrow">${dow(dietDate)}</div>
+      <div class="eyebrow">${dietCalOpen ? `${MONTHS[calMonth.getMonth()]} ${calMonth.getFullYear()}` : dow(dietDate)}</div>
       <h2>${shortD(dietDate)}</h2>
       <div class="caret">${dietCalOpen ? "▲ close calendar" : "▼ pick a date"}</div>
     </div>
-    <button class="arrow" onclick="shiftDietDay(1)">›</button>
+    <button class="arrow" onclick="${dietCalOpen?"shiftMonth(1)":"shiftDietDay(1)"}">›</button>
   </div>`;
   if(dietCalOpen) h += monthCalendar(dietDate, "pickDietDate", dietDots);
 
@@ -965,12 +1173,13 @@ function dietDay(){
     </div>
     <div class="kcal">${calHead}</div>
     <div class="bar">
-      <div style="width:${calFill}%;background:${calOk?'var(--good)':'var(--cardio)'}"></div>
+      <div style="width:${calFill}%;background:${calOk?'var(--good)':'var(--steps)'}"></div>
       <span class="tick" style="left:${calMinPct}%"></span>
       <span class="tick" style="left:${calMaxPct}%"></span>
     </div>
     ${macroRow("Protein", tot.protein, remaining?Math.max(0,t.pMax-tot.protein):tot.protein, t.pMin, t.pMax, "#c4b5fd")}
     ${macroRow("Carbs",   tot.carb,    remaining?Math.max(0,t.cMax-tot.carb):tot.carb,       t.cMin, t.cMax, "var(--good)")}
+    ${subRow("Fiber", tot.fiber, remaining?Math.max(0,t.fbMax-tot.fiber):tot.fiber, t.fbMin, t.fbMax, tot.carb, "rgba(52,211,153,.55)")}
     ${macroRow("Fat",     tot.fat,     remaining?Math.max(0,t.fMax-tot.fat):tot.fat,         t.fMin, t.fMax, "var(--accent)")}
   </div>`;
 
@@ -994,7 +1203,7 @@ function dietDay(){
       </div>`;
     if(!collapsed){
       entries.forEach(e=>{
-        const food = NUT().foods.find(f=>f.id===e.foodId);
+        const food = foodById(e.foodId);
         const m = entryMacros(e);
         h += `<div class="fitem">
           <div style="flex:1">
@@ -1002,7 +1211,7 @@ function dietDay(){
             <div class="qty">
               <input class="num" type="number" inputmode="decimal" value="${esc(e.qty)}" onchange="setEntryQty('${e.id}',this.value)">
               <select onchange="setEntryUnit('${e.id}',this.value)">
-                ${Object.keys(unitTable(e.base)).map(u=>`<option value="${u}" ${e.unit===u?"selected":""}>${u}</option>`).join("")}
+                ${Object.keys(unitTable(eBase(e))).map(u=>`<option value="${u}" ${e.unit===u?"selected":""}>${u}</option>`).join("")}
               </select>
               <button class="icon" onclick="delEntry('${e.id}')">🗑</button>
             </div>
@@ -1022,23 +1231,43 @@ function dietDay(){
   return h;
 }
 
+// food ids logged most recently, newest first — quick picks once the library is big
+function recentFoodIds(n){
+  const log = NUT().log || {}, seen = [], have = new Set();
+  Object.keys(log).sort().reverse().forEach(ds => {
+    (log[ds]||[]).slice().reverse().forEach(e => {
+      if(e.foodId && !have.has(e.foodId)){ have.add(e.foodId); seen.push(e.foodId); }
+    });
+  });
+  return seen.slice(0, n);
+}
+
 function addPicker(meal){
-  const foods = NUT().foods.filter(f => !foodFilter || f.name.toLowerCase().includes(foodFilter.toLowerCase()));
+  const all = allFoods(), term = foodFilter.trim().toLowerCase();
   let h = `<div class="addbox">
     <input type="text" id="dietFilter" placeholder="Filter your foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
-  if(!NUT().foods.length){
-    h += `<p class="sub" style="margin-top:8px">No foods yet. Add some on the Foods tab first.</p>`;
-  } else if(!foods.length){
-    h += `<p class="sub" style="margin-top:8px">No matches.</p>`;
+  let foods = [], heading = "";
+  if(!all.length){
+    h += `<p class="sub" style="margin-top:8px">${libState==="loading" ? "Loading the food library…" : "No foods yet. Add some on the Foods tab first."}</p>`;
+  } else if(!term){
+    // a 500-food library makes an unfiltered alphabetical list useless, so show
+    // what you actually eat and let typing do the rest
+    const rec = recentFoodIds(8).map(id => foodById(id)).filter(Boolean);
+    if(rec.length){ foods = rec; heading = "Recent"; }
+    else if(all.length <= 30) foods = all.slice(0,20);
+    else h += `<p class="sub" style="margin-top:8px">Type to search your ${all.length} foods.</p>`;
   } else {
-    foods.slice(0,20).forEach(f=>{
-      const u = f.refUnit || "g";
-      h += `<div class="pickrow">
-        <div><div class="fn">${esc(f.name)}</div><div class="fq">adds ${esc(f.amount)}${u} · ${round(+f.cal||0)} cal · ${round(+f.protein||0)}p</div></div>
-        <button class="padd" onclick="addEntry('${meal}','${f.id}')">Add</button>
-      </div>`;
-    });
+    foods = all.filter(f => f._n.includes(term)).slice(0,20);
+    if(!foods.length) h += `<p class="sub" style="margin-top:8px">No matches.</p>`;
   }
+  if(heading) h += `<div class="eyebrow" style="color:var(--dimmer);margin:10px 2px 2px">${heading}</div>`;
+  foods.forEach(f=>{
+    const u = f.refUnit || "g";
+    h += `<div class="pickrow">
+      <div><div class="fn">${esc(f.name)}</div><div class="fq">adds ${esc(unitLabel(f.amount, u))} · ${round(+f.cal||0)} cal · ${round(+f.protein||0)}p</div></div>
+      <button class="padd" onclick="addEntry('${meal}','${f.id}')">Add</button>
+    </div>`;
+  });
   h += `<button class="ghost" style="margin-top:10px" onclick="cancelAdd()">Done</button></div>`;
   return h;
 }
@@ -1084,10 +1313,182 @@ function aiScanCard(){
   return h + `</div>`;
 }
 
+/* ---- food library -------------------------------------------------------
+   The shipped library (starter-foods.json) is loaded into memory at startup and
+   mirrored to its own localStorage key so it survives offline. It is never part of D,
+   so its size no longer taxes every save. Saved data holds only: foods you created,
+   foods you edited (a copy that keeps the library id, so logged entries still resolve),
+   and `nutrition.hidden` — library ids you deleted.                              */
+let LIB = [];                         // in-memory library rows, pre-sorted
+let LIB_BY_ID = new Map();
+let libState = "idle";                // idle | loading | ready | error
+let libMsg = "", libFrom = "";        // "network" | "cache"
+let libDropped = null;                // rows reconcileSeeds() removed on this load
+const SEED_URL = "starter-foods.json";
+const FOOD_RESULTS = 25;              // max food cards rendered for one search
+
+const normName = s => String(s||"").trim().toLowerCase();
+// "Generic chicken breast" files under C, not G — otherwise the whole library
+// collapses into one letter and the alphabetical list stops being useful
+const sortKey = f => String(f.name||"").replace(/^generic\s+/i, "").toLowerCase();
+function sortFoods(){ NUT().foods.sort((a,b)=>sortKey(a).localeCompare(sortKey(b))); }
+
+// FNV-1a over the normalised name: short, and stable across reloads and rebuilds of the
+// file, so a logged entry keeps pointing at the same food. Row order is irrelevant except
+// for the collision tiebreak below, which for 500 rows is ~1-in-30,000 to ever be reached.
+function libId(name){
+  let h = 0x811c9dc5;
+  const t = normName(name);
+  for(let i=0;i<t.length;i++){ h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return "lib:" + (h>>>0).toString(36);
+}
+
+function buildLib(rows){
+  const out = [], taken = new Set();
+  rows.forEach(r => {
+    const [name, amount, unit, cal, protein, carb, fiber, fat] = r;
+    if(!name) return;
+    let id = libId(name), k = 1;
+    while(taken.has(id)) id = libId(name) + "." + (k++);
+    taken.add(id);
+    const f = { id, name:String(name), amount:+amount||100, refUnit:unit||"g",
+                cal:+cal||0, protein:+protein||0, carb:+carb||0, fiber:+fiber||0, fat:+fat||0 };
+    f._n = normName(f.name); f._k = sortKey(f);       // precomputed so search doesn't redo it per keystroke
+    out.push(f);
+  });
+  out.sort((a,b)=>a._k.localeCompare(b._k));
+  LIB = out;
+  LIB_BY_ID = new Map(out.map(f => [f.id, f]));
+  invalidateFoods();
+}
+
+async function loadLibrary(force){
+  libState = "loading"; libMsg = ""; render();
+  const v = new URLSearchParams(location.search).get("v") || "1";
+  try{
+    const res = await fetch(SEED_URL + "?v=" + encodeURIComponent(v), { cache: force ? "reload" : "default" });
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    const doc = await res.json();
+    const rows = Array.isArray(doc.foods) ? doc.foods : [];
+    if(!rows.length) throw new Error("the file contained no foods");
+    buildLib(rows);
+    libFrom = "network";
+    const text = JSON.stringify(rows);
+    try{
+      if(text.length <= LIB_MIRROR_MAX) localStorage.setItem(LIB_KEY, text);
+      else localStorage.removeItem(LIB_KEY);          // too big to mirror; the HTTP cache covers offline
+    }catch(e){}
+    const dropped = reconcileSeeds();
+    if(dropped) libDropped = dropped;          // stay quiet when there was nothing to do
+    libState = "ready";
+  }catch(ex){
+    let ok = false;
+    try{
+      const cached = localStorage.getItem(LIB_KEY);
+      if(cached){ buildLib(JSON.parse(cached)); libFrom = "cache"; ok = true; const n = reconcileSeeds(); if(n) libDropped = n; }
+    }catch(e){}
+    libState = ok ? "ready" : "error";
+    libMsg = ok
+      ? "Offline — using the copy stored on this device."
+      : "Couldn't load the library (" + ex.message + "). It has to be served next to index.html; it won't load from a local file preview.";
+  }
+  render();
+}
+
+// One-time cleanup of data written before the library moved out of D. A saved copy of a
+// library food is redundant unless you edited it: entries carry their own rates, so a
+// logged one only needs its foodId repointed at the identical library row. Values in the
+// log are never touched. Safe to run repeatedly; a no-op once there is nothing to move.
+function reconcileSeeds(){
+  const n = NUT();
+  const byName = new Map(LIB.map(f => [f._n, f]));
+  const same = (a,b) => (+a.amount||0)===(+b.amount||0) && (a.refUnit||"g")===(b.refUnit||"g")
+    && ["cal","protein","carb","fiber","fat"].every(k => (+a[k]||0)===(+b[k]||0));
+  const remap = new Map();
+  (n.foods||[]).forEach(f => {
+    if(f.src !== "seed") return;                      // yours, or already reconciled
+    const twin = byName.get(normName(f.name));
+    if(twin && same(f, twin)) remap.set(f.id, twin.id);   // untouched copy of a library row
+  });
+  if(!remap.size) return 0;
+  Object.keys(n.log||{}).forEach(ds => (n.log[ds]||[]).forEach(e => {
+    const to = remap.get(e.foodId);
+    if(to) e.foodId = to;                             // pointer only; qty, name and rates stay put
+  }));
+  n.foods = n.foods.filter(f => !remap.has(f.id));
+  invalidateFoods(); save();
+  return remap.size;
+}
+
+/* merged view -------------------------------------------------------------
+   Pickers and search read `allFoods()`: your foods, plus library foods that aren't
+   shadowed (same id after an edit, or same name from the old seed import) and aren't
+   hidden. Rebuilt only when something changes, so a keystroke costs a filter, not a sort. */
+let foodsCache = null;
+function invalidateFoods(){ foodsCache = null; }
+function allFoods(){
+  if(foodsCache) return foodsCache;
+  const mine = (NUT().foods||[]).map(f => {
+    const c = Object.assign({}, f); c._n = normName(f.name); c._k = sortKey(f); c._mine = true; return c;
+  });
+  const shadow = new Set(NUT().hidden||[]);
+  const names = new Set();
+  mine.forEach(f => { shadow.add(f.id); names.add(f._n); });
+  const rest = LIB.filter(f => !shadow.has(f.id) && !names.has(f._n));
+  foodsCache = mine.concat(rest).sort((a,b)=>a._k.localeCompare(b._k));
+  return foodsCache;
+}
+function foodById(id){
+  return (NUT().foods||[]).find(f=>f.id===id) || LIB_BY_ID.get(id) || null;
+}
+const isMine = id => (NUT().foods||[]).some(f=>f.id===id);
+
+// Editing a library food makes a saved copy that keeps the same id, so anything already
+// logged against it still resolves, and the library row is shadowed rather than duplicated.
+function promote(id){
+  const mine = (NUT().foods||[]).find(x=>x.id===id);
+  if(mine) return mine;
+  const src = LIB_BY_ID.get(id);
+  if(!src) return null;
+  const copy = { id:src.id, name:src.name, amount:src.amount, refUnit:src.refUnit,
+                 cal:src.cal, protein:src.protein, carb:src.carb, fiber:src.fiber, fat:src.fat, src:"lib" };
+  NUT().foods.push(copy); sortFoods(); invalidateFoods();
+  return copy;
+}
+function restoreHidden(){
+  NUT().hidden = [];
+  invalidateFoods(); save(); render();
+}
+function pruneSeedCopies(){
+  const n = reconcileSeeds();
+  libDropped = n;
+  render();
+}
+
+function libraryCard(){
+  const mineCount = (NUT().foods||[]).length;
+  const seeds = (NUT().foods||[]).filter(f=>f.src==="seed").length;
+  const hid = (NUT().hidden||[]).length;
+  const status = libState==="loading" ? "loading…"
+               : libState==="ready" ? `${LIB.length} foods${libFrom==="cache" ? " · offline copy" : ""}`
+               : "not loaded";
+  let h = `<div class="card">
+    <div class="lift"><h3>Food library</h3><span class="last">${status}</span></div>
+    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. Editing one saves your version; deleting one hides it.</p>
+    <div class="sub" style="margin-bottom:10px">Your own foods: ${mineCount}${seeds ? ` · ${seeds} saved copies from the old import` : ""}${hid ? ` · ${hid} hidden` : ""}</div>
+    <button class="ghost" ${libState==="loading"?"disabled":""} onclick="loadLibrary(true)">${libState==="loading"?"Loading…":"Reload library"}</button>`;
+  if(seeds) h += `<button class="ghost" style="margin-top:8px" onclick="pruneSeedCopies()">Drop saved copies the library already provides</button>`;
+  if(hid) h += `<button class="ghost" style="margin-top:8px" onclick="restoreHidden()">Restore ${hid} hidden food${hid===1?"":"s"}</button>`;
+  if(libDropped !== null) h += `<p class="sub" style="margin-top:8px;color:var(--accent)">${libDropped ? `Removed ${libDropped} redundant saved cop${libDropped===1?"y":"ies"} — anything you logged or edited was kept.` : "No redundant copies to remove."}</p>`;
+  if(libMsg) h += `<p class="sub" style="margin-top:8px;color:${libState==="error"?"var(--bad)":"var(--accent)"}">${esc(libMsg)}</p>`;
+  return h + `</div>`;
+}
+
 function dietFoods(){
-  let h = `<p class="sub" style="margin-bottom:12px">Your common foods. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
+  let h = `<p class="sub" style="margin-bottom:12px">Your foods and the shipped library, searched together. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids, or ct for whole items like an egg or a bar — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
 
   h += aiScanCard();
+  h += libraryCard();
 
   // add-food card (prefilled after a scan)
   const sr = scanResult || {};
@@ -1097,29 +1498,46 @@ function dietFoods(){
     <div class="qty" style="margin-top:8px">
       <span class="sub">per</span>
       <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="${sr.grams!=null?esc(sr.grams):"100"}">
-      <select id="nfUnit"><option value="g">g</option><option value="ml">ml</option></select>
+      <select id="nfUnit" onchange="onNewFoodUnit(this.value)">
+        <option value="g">g</option><option value="ml">ml</option><option value="ct">ct</option>
+      </select>
     </div>
     <div class="macros">
-      <div><label>calories</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0" value="${sr.cal!=null?esc(sr.cal):""}"></div>
+      <div><label>cal</label><input class="num" type="number" inputmode="decimal" id="nfCal" placeholder="0" value="${sr.cal!=null?esc(sr.cal):""}"></div>
       <div><label>protein g</label><input class="num" type="number" inputmode="decimal" id="nfP" placeholder="0" value="${sr.protein!=null?esc(sr.protein):""}"></div>
       <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" id="nfC" placeholder="0" value="${sr.carb!=null?esc(sr.carb):""}"></div>
+      <div><label>fiber g</label><input class="num" type="number" inputmode="decimal" id="nfFb" placeholder="0" value="${sr.fiber!=null?esc(sr.fiber):""}"></div>
       <div><label>fat g</label><input class="num" type="number" inputmode="decimal" id="nfF" placeholder="0" value="${sr.fat!=null?esc(sr.fat):""}"></div>
     </div>
     <button class="primary" style="margin-top:10px" onclick="addFood()">+ Add food</button>
   </div>`;
 
-  // search
-  if(NUT().foods.length){
-    h += `<input type="text" id="foodSearch" placeholder="Search foods…" value="${esc(foodSearch)}" oninput="setFoodSearch(this.value)" style="margin-bottom:12px">`;
+  // search — the library is too long to scroll, so nothing lists until you type
+  const merged = allFoods();
+  const total = merged.length;
+  if(total){
+    h += `<input type="text" id="foodSearch" placeholder="Search ${total} foods…" value="${esc(foodSearch)}" oninput="setFoodSearch(this.value)" style="margin-bottom:12px">`;
   }
 
-  const list = NUT().foods.filter(f => !foodSearch || f.name.toLowerCase().includes(foodSearch.toLowerCase()));
-  if(NUT().foods.length && !list.length){
-    h += `<p class="sub">No foods match “${esc(foodSearch)}”.</p>`;
+  const term = foodSearch.trim().toLowerCase();
+  let list = [];
+  if(!total){
+    // nothing saved yet — the add box and starter library above are the whole tab
+  } else if(!term){
+    h += `<p class="sub" style="text-align:center;padding:8px 0">Type to find a food. ${total} available.</p>`;
+  } else {
+    list = merged.filter(f => f._n.includes(term));
+    if(!list.length) h += `<p class="sub">No foods match “${esc(foodSearch)}”.</p>`;
+    else if(list.length > FOOD_RESULTS){
+      h += `<p class="sub">${list.length} matches — showing the first ${FOOD_RESULTS}. Keep typing to narrow it.</p>`;
+      list = list.slice(0, FOOD_RESULTS);
+    }
   }
   list.forEach(f=>{
     const u = f.refUnit || "g";
+    const mine = !!f._mine;
     h += `<div class="foodcard">
+      ${mine ? "" : `<div class="sub" style="margin-bottom:6px;color:var(--dimmer)">library · editing saves your own copy</div>`}
       <input type="text" value="${esc(f.name)}" placeholder="Food name" onchange="editFood('${f.id}','name',this.value)">
       <div class="qty" style="margin-top:8px">
         <span class="sub">per</span>
@@ -1127,15 +1545,17 @@ function dietFoods(){
         <select onchange="editFood('${f.id}','refUnit',this.value)">
           <option value="g" ${u==="g"?"selected":""}>g</option>
           <option value="ml" ${u==="ml"?"selected":""}>ml</option>
+          <option value="ct" ${u==="ct"?"selected":""}>ct</option>
         </select>
       </div>
       <div class="macros">
-        <div><label>calories</label><input class="num" type="number" inputmode="decimal" value="${esc(f.cal)}" onchange="editFood('${f.id}','cal',this.value)"></div>
+        <div><label>cal</label><input class="num" type="number" inputmode="decimal" value="${esc(f.cal)}" onchange="editFood('${f.id}','cal',this.value)"></div>
         <div><label>protein g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.protein)}" onchange="editFood('${f.id}','protein',this.value)"></div>
         <div><label>carbs g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.carb)}" onchange="editFood('${f.id}','carb',this.value)"></div>
+        <div><label>fiber g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.fiber||0)}" onchange="editFood('${f.id}','fiber',this.value)"></div>
         <div><label>fat g</label><input class="num" type="number" inputmode="decimal" value="${esc(f.fat)}" onchange="editFood('${f.id}','fat',this.value)"></div>
       </div>
-      <button class="ghost" style="color:var(--bad);margin-top:8px" onclick="delFood('${f.id}')">Delete ${esc(f.name)}</button>
+      <button class="ghost" style="color:var(--bad);margin-top:8px" onclick="delFood('${f.id}')">${mine ? "Delete" : "Hide"} ${esc(f.name)}</button>
     </div>`;
   });
   return h;
@@ -1156,6 +1576,7 @@ function dietGoals(){
     + pair("Calories","calMin","calMax","cal")
     + pair("Protein","pMin","pMax","g")
     + pair("Carbs","cMin","cMax","g")
+    + pair("Fiber — counted inside carbs","fbMin","fbMax","g")
     + pair("Fat","fMin","fMax","g");
 }
 
@@ -1247,8 +1668,8 @@ async function callVision(img, desc){
   const prompt =
 `You estimate nutrition from a meal photo plus a short user description.
 Respond with ONLY a JSON object — no prose, no markdown fences — in exactly this shape:
-{"name": string, "grams": number, "calories": number, "protein_g": number, "carb_g": number, "fat_g": number, "note": string}
-"grams" is your best estimate of the total edible weight shown. The macro numbers are totals for that whole portion. Keep "note" under 12 words. If unsure, still give your best single estimate.
+{"name": string, "grams": number, "calories": number, "protein_g": number, "carb_g": number, "fiber_g": number, "fat_g": number, "note": string}
+"grams" is your best estimate of the total edible weight shown. The macro numbers are totals for that whole portion. "fiber_g" is the dietary fiber contained within "carb_g", not in addition to it. Keep "note" under 12 words. If unsure, still give your best single estimate.
 
 User description: ${desc || "(none provided)"}`;
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -1282,6 +1703,7 @@ User description: ${desc || "(none provided)"}`;
     cal: Math.round(Number(parsed.calories) || 0),
     protein: Math.round(Number(parsed.protein_g) || 0),
     carb: Math.round(Number(parsed.carb_g) || 0),
+    fiber: Math.round(Number(parsed.fiber_g) || 0),
     fat: Math.round(Number(parsed.fat_g) || 0),
     note: String(parsed.note || "")
   };
@@ -1307,78 +1729,136 @@ async function runScan(){
 /* ============ AI coach (Summary tab) ============ */
 let coachBusy = false;
 let coachMsg = "";
+let openPast = {};                       // archive index -> expanded
+function togglePast(i){ openPast[i] = !openPast[i]; render(); }
 
 const COACH_SYSTEM =
 `You are a single trusted expert combining three roles: a licensed physical therapist, a registered dietitian, and a science-based strength & conditioning coach. You give evidence-based, practical, specific guidance.
 
-You will receive a compiled summary of the user's last two weeks: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals.
+You will receive a compiled summary of the user's full logged history: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals. You may also receive the analyses you wrote in previous sessions. Treat those as your own memory: check whether your earlier recommendations were followed and what happened, say plainly when something you predicted or prescribed did not work, and build on that advice instead of restating it. Analyses are run roughly every two weeks, so the window since your last one is the main thing to judge.
 
 Deliver, in clear structured sections with short headers:
 1. Progress — where they are versus their goals, reading the bodyweight trend and adherence honestly.
 2. What's working / what's not.
 3. Recommendations — be concrete and numeric: suggest specific calorie and macronutrient target ranges (give numbers), training adjustments (volume, exercise selection, progression, frequency), and recovery. Tie advice to their stated goals.
 
-Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct, avoid filler, and keep it readable on a phone.`;
+Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct and avoid filler. Keep the whole response concise and readable on a phone — aim for roughly 400–600 words, and always finish every section rather than cutting off.`;
 
-function weeklyRate(asc){
-  if(asc.length < 2) return null;
-  const latest = pd(asc[asc.length-1].date).getTime();
-  const win = asc.filter(w => (latest - pd(w.date).getTime())/864e5 <= 28);
-  const reg = win.length >= 2 ? win : asc;
-  const r0 = pd(reg[0].date).getTime();
-  const xs = reg.map(w => (pd(w.date).getTime()-r0)/864e5), ys = reg.map(w => w.value);
+function linRateWk(pts){
+  if(pts.length < 2) return null;
+  const r0 = pd(pts[0].date).getTime();
+  const xs = pts.map(w => (pd(w.date).getTime()-r0)/864e5), ys = pts.map(w => w.value);
   const n=xs.length, sx=xs.reduce((a,b)=>a+b,0), sy=ys.reduce((a,b)=>a+b,0),
         sxx=xs.reduce((a,b)=>a+b*b,0), sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
   const dd = n*sxx - sx*sx;
   return dd ? ((n*sxy - sx*sy)/dd)*7 : 0;
 }
+function weeklyRate(asc){
+  if(asc.length < 2) return null;
+  const latest = pd(asc[asc.length-1].date).getTime();
+  const win = asc.filter(w => (latest - pd(w.date).getTime())/864e5 <= 28);
+  return linRateWk(win.length >= 2 ? win : asc);
+}
 
-function buildCoachContext(){
-  const c = D.coach, lines = [];
+/* ---- analysis archive -------------------------------------------------- */
+const COACH_KEEP     = 12;    // analyses retained in storage
+const COACH_SEND     = 3;     // most recent analyses sent back to the model in full
+const CLIP_ASSISTANT = 4000;  // chars of a past analysis to resend
+const CLIP_USER      = 600;   // chars of a past follow-up to resend
+const clip = (s, n) => { s = String(s||""); return s.length > n ? s.slice(0, n) + " …[truncated]" : s; };
+
+// history array as it would stand if the current analysis were archived right now
+function coachArchive(){
+  const c = D.coach;
+  const hist = (c.history || []).slice();
+  if(c.current && (c.current.messages||[]).some(m => m.role==="assistant" && (m.content||"").trim())){
+    hist.push({ date: c.current.date, messages: c.current.messages.slice(1) });  // drop the data blob
+  }
+  return hist.slice(-COACH_KEEP);
+}
+
+function pastAnalysesBlock(hist){
+  if(!hist.length) return "";
+  const L = ["\n=== YOUR PREVIOUS ANALYSES (oldest first) ==="];
+  const older = hist.slice(0, Math.max(0, hist.length - COACH_SEND));
+  if(older.length) L.push(`Earlier analyses were written on: ${older.map(a=>a.date).join(", ")} (full text omitted here).`);
+  hist.slice(-COACH_SEND).forEach(a => {
+    L.push(`\n--- Analysis of ${a.date} ---`);
+    (a.messages||[]).forEach(m => {
+      if(m.role === "assistant") L.push("YOU WROTE: " + clip(m.content, CLIP_ASSISTANT));
+      else                       L.push("USER ASKED: " + clip(m.content, CLIP_USER));
+    });
+  });
+  return L.join("\n");
+}
+
+function buildCoachContext(hist){
+  const c = D.coach, L = [];
   const today0 = pd(today()).getTime();
+  hist = hist || [];
 
-  lines.push("=== USER GOALS ===");
-  lines.push(c.goals && c.goals.trim() ? c.goals.trim() : "(none written)");
+  L.push("=== INSTRUCTIONS ===");
+  L.push(hist.length
+    ? `Your previous analyses are reproduced below; the most recent was ${hist[hist.length-1].date} (${ago(hist[hist.length-1].date)} days ago). Judge what has changed since then: which of your recommendations were followed, which were not, and what the data show as a result. Do not repeat that advice verbatim — revise it. Use the full history for long-term trends.`
+    : `This is the first analysis. Assess the full history below.`);
+
+  const past = pastAnalysesBlock(hist);
+  if(past) L.push(past);
+
+  L.push("\n=== GOALS ===");
+  L.push(c.goals && c.goals.trim() ? c.goals.trim() : "(none written)");
 
   const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
-  lines.push("\n=== BODYWEIGHT ===");
+  L.push("\n=== BODYWEIGHT (full history) ===");
   if(asc.length){
-    lines.push(`Current: ${asc[asc.length-1].value} lb (${asc[asc.length-1].date})`);
-    const r = weeklyRate(asc);
-    if(r!=null) lines.push(`4-week rate: ${r.toFixed(2)} lb/week`);
-    lines.push(`Recent weigh-ins: ${asc.slice(-10).map(w=>w.date+":"+w.value).join(", ")}`);
-  } else lines.push("No weigh-ins logged.");
+    L.push(`${asc.length} weigh-ins, ${asc[0].date} (${asc[0].value} lb) → ${asc[asc.length-1].date} (${asc[asc.length-1].value} lb).`);
+    const rAll = linRateWk(asc), r4 = weeklyRate(asc);
+    if(rAll!=null) L.push(`Overall rate: ${rAll.toFixed(2)} lb/week. Recent 4-week rate: ${r4.toFixed(2)} lb/week.`);
+    const show = asc.length > 40 ? asc.slice(-40) : asc;
+    L.push(`${asc.length>40?"Last 40 ":"All "}weigh-ins: ${show.map(w=>w.date+":"+w.value).join(", ")}`);
+  } else L.push("None logged.");
 
   const t = NUT().targets;
-  lines.push("\n=== NUTRITION TARGETS ===");
-  lines.push(`Calories ${t.calMin}-${t.calMax} | Protein ${t.pMin}-${t.pMax}g | Carbs ${t.cMin}-${t.cMax}g | Fat ${t.fMin}-${t.fMax}g`);
+  L.push("\n=== NUTRITION TARGETS ===");
+  L.push(`Calories ${t.calMin}-${t.calMax} | Protein ${t.pMin}-${t.pMax}g | Carbs ${t.cMin}-${t.cMax}g (of which fiber ${t.fbMin}-${t.fbMax}g) | Fat ${t.fMin}-${t.fMax}g`);
 
-  const days = [];
-  for(let i=0;i<14;i++){
-    const ds = iso(new Date(today0 - i*864e5));
-    if(dayEntries(ds).length) days.push(dayTotals(ds));
-  }
-  lines.push("\n=== NUTRITION, LAST 14 DAYS (logged days only) ===");
-  if(days.length){
-    const s = days.reduce((a,d)=>({cal:a.cal+d.cal,p:a.p+d.protein,c:a.c+d.carb,f:a.f+d.fat}),{cal:0,p:0,c:0,f:0});
-    const n = days.length;
-    lines.push(`Days logged: ${n}/14`);
-    lines.push(`Average per logged day: ${round(s.cal/n)} cal, ${round(s.p/n)}g protein, ${round(s.c/n)}g carb, ${round(s.f/n)}g fat`);
-  } else lines.push("No nutrition logged in the last 14 days.");
+  const logDates = Object.keys(NUT().log).filter(d=>dayEntries(d).length).sort();
+  L.push("\n=== NUTRITION ADHERENCE ===");
+  if(logDates.length){
+    const avg = dates => {
+      const s = dates.reduce((a,ds)=>{const x=dayTotals(ds);return{cal:a.cal+x.cal,p:a.p+x.protein,c:a.c+x.carb,fb:a.fb+x.fiber,f:a.f+x.fat};},{cal:0,p:0,c:0,fb:0,f:0});
+      const n = dates.length;
+      return `${round(s.cal/n)} cal, ${round(s.p/n)}g P, ${round(s.c/n)}g C (incl. ${round(s.fb/n)}g fiber), ${round(s.f/n)}g F (${n} days)`;
+    };
+    L.push(`Full-period avg/day: ${avg(logDates)}. Range ${logDates[0]}–${logDates[logDates.length-1]}.`);
+    const recent = logDates.filter(ds => (today0 - pd(ds).getTime())/864e5 <= 14);
+    if(recent.length) L.push(`Last 14 days avg/day: ${avg(recent)}.`);
+  } else L.push("No nutrition logged.");
 
-  lines.push("\n=== TRAINING, LAST 14 DAYS ===");
-  const recent = D.sessions.filter(s => (today0 - pd(s.date).getTime())/864e5 <= 14).sort((a,b)=>a.date.localeCompare(b.date));
-  if(recent.length){
-    recent.forEach(s=>{
-      if(s.workout==="C") lines.push(`${s.date} Cardio: ${cardioText(s)}`);
-      else {
-        const exs = (s.exercises||[]).map(e=>`${e.name} ${(e.sets||[]).length} sets (vol ${round(exVolume(e))})`).join("; ");
-        lines.push(`${s.date} ${wLabel(s.workout)}: ${exs}`);
-      }
+  L.push("\n=== TRAINING ===");
+  const sess = [...D.sessions].sort((a,b)=>a.date.localeCompare(b.date));
+  if(sess.length){
+    L.push(`${sess.length} sessions, ${sess[0].date} → ${sess[sess.length-1].date}.`);
+    const byEx = {};
+    sess.forEach(s => (s.exercises||[]).forEach(e => { (byEx[e.name]=byEx[e.name]||[]).push({date:s.date, e}); }));
+    L.push("Per-exercise progression (first → latest):");
+    Object.keys(byEx).forEach(name=>{
+      const arr = byEx[name], f = arr[0].e, l = arr[arr.length-1].e;
+      const fmt = e => `${fmtNum(Math.round(meanOf(e.sets,"weight")*10)/10)}lb×${(e.sets||[]).length}×${fmtNum(Math.round(meanOf(e.sets,"reps")*10)/10)} vol ${round(exVolume(e))}`;
+      L.push(`  ${name}: done ${arr.length}× | ${arr[0].date} ${fmt(f)} → ${arr[arr.length-1].date} ${fmt(l)}`);
     });
-  } else lines.push("No training sessions in the last 14 days.");
+    const recent = sess.filter(s => (today0 - pd(s.date).getTime())/864e5 <= 14);
+    L.push("Recent sessions (last 14 days):");
+    if(recent.length) recent.forEach(s=>{
+      if(s.workout==="C") L.push(`  ${s.date} Steps: ${dayDetail(s)}`);
+      else L.push(`  ${s.date} ${wLabel(s.workout)}: ` + (s.exercises||[]).map(e=>`${e.name} vol ${round(exVolume(e))}`).join("; "));
+    }); else L.push("  (none)");
+    const a7 = stepsAvg(7), a28 = stepsAvg(28);
+    if(a7)  L.push(`Steps: 7-day average ${a7.avg} across ${a7.days} logged day(s).`);
+    if(a28) L.push(`Steps: 28-day average ${a28.avg} across ${a28.days} logged day(s). Days with no entry are not counted, so treat coverage as partial.`);
+  } else L.push("No training logged.");
 
-  return lines.join("\n");
+  return L.join("\n");
 }
 
 async function callCoach(messages, maxTokens){
@@ -1399,20 +1879,39 @@ async function callCoach(messages, maxTokens){
     throw new Error(msg);
   }
   const data = await res.json();
-  return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("").trim();
+  const text = (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("").trim();
+  if(!text){
+    const reason = data.stop_reason || "unknown";
+    const types = (data.content||[]).map(b=>b.type).join(",") || "none";
+    if(reason === "refusal"){
+      throw new Error("the model declined this request. Try wording your goals more neutrally, or switch models in ⚙.");
+    }
+    throw new Error("no text came back (stop_reason: " + reason + ", blocks: " + types + ")");
+  }
+  return text;
 }
 
 function saveGoals(v){ D.coach.goals = v; save(); }
 
-async function runAnalysis(){
+/* Two-week lock: days still to wait before a new analysis is allowed (0 = ready) */
+const COACH_INTERVAL = 14;
+function lockDaysLeft(){
+  const lr = D.coach.lastRun;
+  if(!lr) return 0;
+  return Math.max(0, COACH_INTERVAL - ago(lr));
+}
+
+async function runAnalysis(force){
   if(!aiKey){ coachMsg = "Set your API key on the Diet → Foods tab (⚙) first."; render(); return; }
-  const daysLeft = D.coach.lastRun ? 14 - ago(D.coach.lastRun) : 0;
-  if(daysLeft > 0){ coachMsg = `Next analysis available in ${daysLeft} day${daysLeft===1?"":"s"}.`; render(); return; }
-  coachBusy = true; coachMsg = "Analyzing your last two weeks with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
+  if(!force && lockDaysLeft() > 0){ coachMsg = `Next analysis unlocks in ${lockDaysLeft()} day(s).`; render(); return; }
+  const hist = coachArchive();     // includes the analysis currently on screen
+  coachBusy = true; coachMsg = "Analyzing your history with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
   try{
-    const messages = [{ role:"user", content: buildCoachContext() + "\n\nGive me a full progress analysis and recommendations." }];
-    const reply = await callCoach(messages, 1500);
+    const messages = [{ role:"user", content: buildCoachContext(hist) + "\n\nAs my coach, give me a full progress analysis and evidence-based, sustainable recommendations for a healthy adult pursuing general fitness and body-composition goals." }];
+    const reply = await callCoach(messages, 25000);
+    if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     messages.push({ role:"assistant", content: reply });
+    D.coach.history = hist;        // only commit the archive once the new one succeeded
     D.coach.current = { date: today(), messages };
     D.coach.lastRun = today();
     coachBusy = false; coachMsg = "";
@@ -1435,7 +1934,8 @@ async function sendFollowup(){
   coachBusy = true; coachMsg = "Thinking…"; render();
   D.coach.current.messages.push({ role:"user", content: text });
   try{
-    const reply = await callCoach(D.coach.current.messages, 1000);
+    const reply = await callCoach(D.coach.current.messages, 25000);
+    if(!reply || !reply.trim()) throw new Error("the model returned an empty response");
     D.coach.current.messages.push({ role:"assistant", content: reply });
     coachBusy = false; coachMsg = "";
     save(); render();
@@ -1465,22 +1965,24 @@ function viewSummary(){
     <textarea id="goalsInput" class="ta" rows="4" placeholder="e.g. drop to ~175 lb while keeping strength; hit 180g protein; run a 10k" onchange="saveGoals(this.value)">${esc(c.goals||"")}</textarea>
   </div>`;
 
-  const locked = c.lastRun && ago(c.lastRun) < 14;
-  const daysLeft = c.lastRun ? Math.max(0, 14 - ago(c.lastRun)) : 0;
+  const hasAnalysis = c.current && c.current.messages.some(m => m.role==="assistant" && (m.content||"").trim());
+  const left = lockDaysLeft();            // two-week lock between analyses
   h += `<div class="card">`;
   if(!aiKey){
     h += `<p class="sub">Set your Anthropic API key on the <b>Diet → Foods</b> tab (⚙ on the Scan card) to enable AI analysis.</p>`;
-  } else if(locked){
-    h += `<button class="ghost" disabled>Next analysis in ${daysLeft} day${daysLeft===1?"":"s"}</button>
-      <p class="sub" style="margin-top:8px">A fresh analysis unlocks every two weeks. You can still ask follow-ups below.</p>`;
+  } else if(left > 0){
+    const next = iso(new Date(pd(c.lastRun).getTime() + COACH_INTERVAL*864e5));
+    h += `<button class="ghost" disabled>Locked · ${left} day${left===1?"":"s"} left</button>
+      <p class="sub" style="margin-top:8px">Analyses run every ${COACH_INTERVAL} days so there is real change to judge. Last run ${shortD(c.lastRun)} · next ${shortD(next)}. Follow-ups below still work.</p>
+      <p class="sub" style="margin-top:6px"><a href="#" style="color:var(--dim)" onclick="event.preventDefault();if(confirm('Run early? This archives the current analysis and resets the ${COACH_INTERVAL}-day timer.'))runAnalysis(true)">Run early anyway</a></p>`;
   } else {
-    h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(c.current?"Run a new analysis":"Get AI analysis")}</button>
-      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Runs once every two weeks.</p>`;
+    h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(hasAnalysis?"Run a new analysis":"Get AI analysis")}</button>
+      <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history${(c.history||[]).length?" and your previous "+(c.history||[]).length+" analys"+((c.history||[]).length===1?"is":"es"):""}.</p>`;
   }
   if(coachMsg) h += `<p class="sub" style="margin-top:8px;color:${coachMsg.includes("failed")?"var(--bad)":"var(--dim)"}">${esc(coachMsg)}</p>`;
   h += `</div>`;
 
-  if(c.current){
+  if(hasAnalysis){
     h += `<div class="eyebrow" style="color:var(--dimmer);margin:6px 2px">Analysis · ${shortD(c.current.date)}</div>`;
     c.current.messages.forEach((m,i)=>{
       if(i===0) return;                          // hide the compiled data context
@@ -1497,14 +1999,34 @@ function viewSummary(){
       h += `<p class="sub" style="text-align:center;margin-top:12px">All 5 follow-ups used for this analysis. A new analysis resets them.</p>`;
     }
   }
+
+  const hist = c.history || [];
+  if(hist.length){
+    h += `<div class="eyebrow" style="color:var(--dimmer);margin:18px 2px 6px">Earlier analyses (kept as coach memory)</div>`;
+    hist.slice().reverse().forEach((a, k) => {
+      const i = hist.length - 1 - k;
+      const open = !!openPast[i];
+      h += `<div class="card" style="margin-bottom:8px">
+        <div onclick="togglePast(${i})" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer">
+          <span><span class="caret" style="margin-right:6px;display:inline-block">${open?"▾":"▸"}</span>${shortD(a.date)}</span>
+          <span class="sub">${(a.messages||[]).filter(m=>m.role==="user").length} follow-up(s)</span>
+        </div>`;
+      if(open) (a.messages||[]).forEach(m => {
+        const isUser = m.role === "user";
+        h += `<div class="coachmsg ${isUser?"cu":"ca"}" style="margin-top:10px">${isUser ? esc(m.content) : mdToHtml(m.content)}</div>`;
+      });
+      h += `</div>`;
+    });
+    h += `<p class="sub" style="text-align:center;margin-top:6px">The last ${COACH_SEND} are sent back to the coach in full; older ones by date only. Last ${COACH_KEEP} kept.</p>`;
+  }
   return h;
 }
 
 function addEntry(meal, foodId){
-  const food = NUT().foods.find(f=>f.id===foodId);
+  const food = foodById(foodId);
   if(!food) return;
   const base = food.refUnit || "g";
-  const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:(food.amount||100), unit:base, base, per:perBase(food) };
+  const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:(food.amount||100), unit:base, per:perBase(food) };
   if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
   NUT().log[dietDate].push(entry);
   save(); render();
@@ -1521,32 +2043,49 @@ function delEntry(id){
   save(); render();
 }
 
+// switching the new-food unit swaps the placeholder amount (1 for ct, 100 for g/ml)
+// but only while it still holds a default, so a typed number is never clobbered
+function onNewFoodUnit(v){
+  const a = document.getElementById("nfAmount");
+  if(!a) return;
+  if(a.value==="" || a.value==="1" || a.value==="100") a.value = String(UNIT_DEFAULT_AMOUNT[v] || 100);
+}
 function addFood(){
   const name = document.getElementById("nfName").value.trim();
   if(!name){ err="Give the food a name."; render(); return; }
   const num = id => parseFloat(document.getElementById(id).value) || 0;
+  const unit = document.getElementById("nfUnit").value;
   NUT().foods.push({
     id:"f"+Date.now(), name,
-    amount: num("nfAmount")||100,
-    refUnit: document.getElementById("nfUnit").value,
-    cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fat:num("nfF")
+    amount: num("nfAmount") || UNIT_DEFAULT_AMOUNT[unit] || 100,
+    refUnit: unit,
+    cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fiber:num("nfFb"), fat:num("nfF")
   });
-  NUT().foods.sort((a,b)=>a.name.localeCompare(b.name));
+  sortFoods(); invalidateFoods();
   scanResult = null; scanMsg = "";
   save(); render();
 }
 function editFood(id,f,v){
-  const food = NUT().foods.find(x=>x.id===id);
+  const food = promote(id);          // library rows become your own copy on first edit
   if(!food) return;
-  food[f] = (f==="name" || f==="refUnit") ? v : (parseFloat(v)||0);
+  if(f==="refUnit"){
+    const wasDefault = food.amount === (UNIT_DEFAULT_AMOUNT[food.refUnit || "g"] || 100);
+    food.refUnit = v;
+    if(wasDefault) food.amount = UNIT_DEFAULT_AMOUNT[v] || 100;   // 100g → 1 ct, 1 ct → 100g
+  } else {
+    food[f] = (f==="name") ? v : (parseFloat(v)||0);
+  }
+  invalidateFoods();
   save();
   if(f==="name" || f==="refUnit") render();
 }
 function delFood(id){
-  const food = NUT().foods.find(x=>x.id===id);
-  if(!confirm(`Delete ${food?food.name:"this food"}? Days you've already logged keep their entries.`)) return;
+  const food = foodById(id);
+  const lib = LIB_BY_ID.has(id);
+  if(!confirm(`${lib?"Hide":"Delete"} ${food?food.name:"this food"}? Days you've already logged keep their entries.`)) return;
   NUT().foods = NUT().foods.filter(x=>x.id!==id);
-  save(); render();
+  if(lib && !(NUT().hidden||[]).includes(id)) NUT().hidden.push(id);   // otherwise it returns on the next load
+  invalidateFoods(); save(); render();
 }
 function setTarget(k,v){ NUT().targets[k] = parseFloat(v)||0; save(); }
 
@@ -1565,7 +2104,7 @@ function rowHintInner(d, prev){
   const lastVol = exVolume(prev);
   const curVol = exVolume(d);
   const mw = fmtNum(Math.round(meanOf(prev.sets,"weight")*10)/10);   // mean weight (1 dp)
-  const mr = Math.round(meanOf(prev.sets,"reps"));                    // mean reps
+  const mr = fmtNum(Math.round(meanOf(prev.sets,"reps")*10)/10);      // mean reps (1 dp)
   let s = `last: ${mw} lb · ${(prev.sets||[]).length}×${mr} · vol ${round(lastVol)}`;
   if(curVol > 0){
     const cls = curVol > lastVol ? "up" : (curVol < lastVol ? "down" : "");
@@ -1591,7 +2130,7 @@ function setExName(i,v){
 }
 function addSet(i){ draft[i].sets.push({weight:"",reps:""}); justSaved=false; writeScratch(); render(); }
 function delSet(i,j){ if(draft[i].sets.length>1){ draft[i].sets.splice(j,1); justSaved=false; writeScratch(); render(); } }
-function setCardio(f,v){ cardioDraft[f]=v; justSaved=false; }
+function setSteps(v){ stepsDraft = v; justSaved=false; }
 function addLift(){
   const row = withUid({ name:"", sets:[{weight:"",reps:""},{weight:"",reps:""},{weight:"",reps:""}] });
   draft.push(row); openEx[row._uid] = true; justSaved=false; writeScratch(); render();
@@ -1613,14 +2152,16 @@ function saveSession(){
                 { date:trainDate, workout:trainWorkout, exercises }]
                 .sort((a,b)=>b.date.localeCompare(a.date));
   if(D.scratch) delete D.scratch[scratchKey()];   // committed — clear the unsaved copy
-  save(); justSaved=true; render();
+  save(); saveScratch(); justSaved=true; render();
 }
 
-function saveCardio(){
-  const m = cardioDraft.minutes, mi = cardioDraft.miles;
-  if(!m && !mi){ err="Enter minutes or miles — either one is enough."; render(); return; }
-  D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout==="C")),
-                { date:trainDate, workout:"C", cardio:{ minutes:m, miles:mi } }]
+function saveSteps(){
+  const n = parseFloat(stepsDraft);
+  if(!(n > 0)){ err="Enter a step count."; render(); return; }
+  const old = sessionOn(trainDate, "C") || {};
+  const rec = { date:trainDate, workout:"C", steps: Math.round(n) };
+  if(old.cardio) rec.cardio = old.cardio;          // keep anything logged under the old Cardio slot
+  D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout==="C")), rec]
                 .sort((a,b)=>b.date.localeCompare(a.date));
   save(); justSaved=true; render();
 }
@@ -1721,7 +2262,7 @@ async function importAll(e){
 
     const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
     D = upgraded;
-    save(); ensureSelection(); seedDraft();
+    save(); saveScratch(); invalidateFoods(); ensureSelection(); seedDraft();
     note = v < SCHEMA
       ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.`
       : "Restored from backup.";
@@ -1777,6 +2318,12 @@ loadAiSettings();
 ensureSelection();
 seedDraft();
 render();
+loadLibrary();                    // async — the UI is usable immediately, foods appear when it lands
+
+// iOS can suspend or kill a backgrounded web app with no further events, so commit
+// any debounced write the moment the app stops being visible
+addEventListener("pagehide", flushPending);
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden") flushPending(); });
 </script>
 </body>
 </html>
