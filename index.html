@@ -222,7 +222,7 @@ const KEY = "gymlog.v1";
 // two phases, two foods, two entries — so a counter is appended.
 let idSeq = 0;
 const uid = prefix => prefix + Date.now().toString(36) + (idSeq++).toString(36);
-const AI_KEY_LS = "gymlog.ai.key";      // stored separately so it never lands in a backup
+const AI_KEY_LS = "gymlog.ai.key";      // retired in favour of the server-held key; removed on load
 /* ---- cloud backup ----
    The access code names which backup in the cloud is yours. Like the AI key it lives
    in its own localStorage key and never lands in an export: an export is a file you
@@ -231,6 +231,7 @@ const AI_KEY_LS = "gymlog.ai.key";      // stored separately so it never lands i
 const SYNC_CODE_LS  = "gymlog.sync.code";
 const SYNC_STATE_LS = "gymlog.sync.state";
 const SYNC_URL      = "/api/backup";    // same origin: the Worker serving this file also answers here
+const AI_URL        = "/api/ai";        // the Worker holds the Anthropic key; no key ever reaches this device
 const SYNC_EVERY    = 3 * 60 * 1000;    // ms between automatic attempts while the app is open
 let syncCode = "";
 let syncState = { at:null, ok:null, msg:"" };
@@ -239,7 +240,6 @@ let syncBusy = false;
 let syncList = null;                    // dates fetched for the restore picker, null until asked
 const AI_MODEL = "claude-sonnet-5";     // one model, no picker: the cheaper one guessed portions badly
 const AI_LABEL = "Sonnet 5";
-let aiKey = "";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -1765,17 +1765,16 @@ function aiScanCard(){
       <button class="icon" onclick="toggleAiSettings()">⚙</button>
     </div>`;
 
-  if(aiSettingsOpen || !aiKey){
-    h += `<p class="sub" style="margin:8px 0">Uses your own Anthropic API key. It's stored only on this device and is never included in backups.</p>
-      <input type="password" id="aiKeyInput" placeholder="Anthropic API key (sk-ant-…)" value="${esc(aiKey)}" style="margin-bottom:8px">
-      <div class="row">
-        <button class="primary grow" onclick="saveAiKey()">Save</button>
-        ${aiKey ? `<button class="ghost" onclick="clearAiKey()">Remove key</button>` : ""}
-      </div>`;
+  if(aiSettingsOpen || !syncCode){
+    h += `<p class="sub" style="margin:8px 0;line-height:1.5">
+      AI runs through this app's own server, which holds the API key. Nothing to paste here —
+      it uses the access code from the <b>Backup</b> tab, so that one code covers both your
+      cloud backup and AI.${syncCode ? "" : " No access code is set yet."}</p>`;
+    if(aiSettingsOpen) h += `<button class="ghost" onclick="toggleAiSettings()">Close</button>`;
     return h + `</div>`;
   }
 
-  // key present: scan controls
+  // access code present: scan controls
   h += `<div class="sub" style="margin:6px 0 10px">Model: ${AI_LABEL} · roughly a cent per scan</div>`;
   h += `<div class="row" style="margin-bottom:10px">` + SCAN_MODES.map(([k,label]) =>
     `<button class="${scanMode===k?"primary":"ghost"} grow" onclick="setScanMode('${k}')">${label}</button>`).join("") + `</div>`;
@@ -2351,21 +2350,14 @@ function setFoodSearch(v){ foodSearch=v; render(); }
 /* ============ AI meal scan (bring your own key) ============ */
 function loadAiSettings(){
   try{
-    aiKey = localStorage.getItem(AI_KEY_LS) || "";
+    /* The key now lives on the server. Any copy still sitting in localStorage from an
+       older build is a live credential on a device, so it is deleted rather than read. */
+    localStorage.removeItem(AI_KEY_LS);
     localStorage.removeItem(AI_MODEL_LS);        // the model is no longer a setting
     localStorage.removeItem(LIB_STALE_KEY);      // and neither is the offline library copy
   }catch(e){}
 }
-function saveAiKey(){
-  aiKey = (document.getElementById("aiKeyInput").value || "").trim();
-  try{ localStorage.setItem(AI_KEY_LS, aiKey); }catch(e){}
-  aiSettingsOpen = false; scanMsg = ""; render();
-}
-function clearAiKey(){
-  aiKey = "";
-  try{ localStorage.removeItem(AI_KEY_LS); }catch(e){}
-  render();
-}
+
 function toggleAiSettings(){ aiSettingsOpen = !aiSettingsOpen; render(); }
 function setScanDesc(v){ scanDesc = v; }
 function setScanMode(m){
@@ -2456,13 +2448,11 @@ async function callVision(imgs, desc, mode){
   const content = imgs.map(im => ({ type:"image", source:{ type:"base64", media_type: im.mediaType, data: im.data } }));
   content.push({ type:"text", text: (mode === "recipe" ? "Recipe text or notes from the user: " : "User description: ")
                                     + (desc.trim() || "(none provided)") });
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(AI_URL, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-api-key": aiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
+      "x-gym-code": syncCode
     },
     body: JSON.stringify({
       model: AI_MODEL,
@@ -2512,7 +2502,7 @@ function lastJson(text){
 }
 
 async function runScan(){
-  if(!aiKey){ scanMsg = "Enter your API key first (⚙)."; render(); return; }
+  if(!syncCode){ scanMsg = "Set your access code on the Backup tab first."; render(); return; }
   if(!scanImgs.length && !(scanMode === "recipe" && scanDesc.trim())){
     scanMsg = scanMode === "recipe" ? "Add a photo or paste the recipe first." : "Add a photo first.";
     render(); return;
@@ -2713,13 +2703,11 @@ function buildCoachContext(hist){
 
 async function callCoach(messages, maxTokens){
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(AI_URL, {
     method:"POST",
     headers:{
       "content-type":"application/json",
-      "x-api-key": aiKey,
-      "anthropic-version":"2023-06-01",
-      "anthropic-dangerous-direct-browser-access":"true"
+      "x-gym-code": syncCode
     },
     body: JSON.stringify({ model: AI_MODEL, max_tokens: maxTokens||1400, system: COACH_SYSTEM, messages })
   });
@@ -2752,7 +2740,7 @@ function lockDaysLeft(){
 }
 
 async function runAnalysis(force){
-  if(!aiKey){ coachMsg = "Set your API key on the Diet → Foods tab (⚙) first."; render(); return; }
+  if(!syncCode){ coachMsg = "Set your access code on the Backup tab first."; render(); return; }
   if(!force && lockDaysLeft() > 0){ coachMsg = `Next analysis unlocks in ${lockDaysLeft()} day(s).`; render(); return; }
   const hist = coachArchive();     // includes the analysis currently on screen
   coachBusy = true; coachMsg = "Analyzing your history with " + AI_LABEL + "…"; render();
@@ -2818,8 +2806,8 @@ function viewSummary(){
   const hasAnalysis = c.current && c.current.messages.some(m => m.role==="assistant" && (m.content||"").trim());
   const left = lockDaysLeft();            // two-week lock between analyses
   h += `<div class="card">`;
-  if(!aiKey){
-    h += `<p class="sub">Set your Anthropic API key on the <b>Diet → Foods</b> tab (⚙ on the Scan card) to enable AI analysis.</p>`;
+  if(!syncCode){
+    h += `<p class="sub">Set your access code on the <b>Backup</b> tab to enable AI analysis.</p>`;
   } else if(left > 0){
     const next = iso(new Date(pd(c.lastRun).getTime() + COACH_INTERVAL*864e5));
     h += `<button class="ghost" disabled>Locked · ${left} day${left===1?"":"s"} left</button>
