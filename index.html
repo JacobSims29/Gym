@@ -219,11 +219,9 @@
 /* ============ constants ============ */
 const KEY = "gymlog.v1";
 const AI_KEY_LS = "gymlog.ai.key";      // stored separately so it never lands in a backup
-const AI_MODEL_LS = "gymlog.ai.model";
-const AI_MODELS = { haiku: "claude-haiku-4-5-20251001", sonnet: "claude-sonnet-5" };
-const AI_LABEL = { haiku: "Haiku 4.5", sonnet: "Sonnet 5" };
+const AI_MODEL = "claude-sonnet-5";     // one model, no picker: the cheaper one guessed portions badly
+const AI_LABEL = "Sonnet 5";
 let aiKey = "";
-let aiModel = "haiku";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -1274,13 +1272,6 @@ function aiScanCard(){
   if(aiSettingsOpen || !aiKey){
     h += `<p class="sub" style="margin:8px 0">Uses your own Anthropic API key. It's stored only on this device and is never included in backups.</p>
       <input type="password" id="aiKeyInput" placeholder="Anthropic API key (sk-ant-…)" value="${esc(aiKey)}" style="margin-bottom:8px">
-      <div class="qty" style="margin:0 0 10px">
-        <span class="sub">model</span>
-        <select id="aiModelSelect">
-          <option value="haiku" ${aiModel==="haiku"?"selected":""}>Haiku 4.5 (cheapest)</option>
-          <option value="sonnet" ${aiModel==="sonnet"?"selected":""}>Sonnet 5 (more accurate)</option>
-        </select>
-      </div>
       <div class="row">
         <button class="primary grow" onclick="saveAiKey()">Save</button>
         ${aiKey ? `<button class="ghost" onclick="clearAiKey()">Remove key</button>` : ""}
@@ -1289,7 +1280,7 @@ function aiScanCard(){
   }
 
   // key present: scan controls
-  h += `<div class="sub" style="margin:6px 0 10px">Model: ${AI_LABEL[aiModel]||aiModel} · roughly a fraction of a cent per scan</div>`;
+  h += `<div class="sub" style="margin:6px 0 10px">Model: ${AI_LABEL} · roughly a cent per scan</div>`;
   h += `<input type="file" accept="image/*" id="scanFile" class="hide" onchange="onScanFile(event)">`;
   if(!scanImg){
     h += `<button class="ghost" onclick="document.getElementById('scanFile').click()">${scanBusy?"…":"Choose or take a photo"}</button>`;
@@ -1322,13 +1313,37 @@ const FOOD_RESULTS = 25;              // max food cards rendered for one search
 const normName = s => String(s||"").trim().toLowerCase();
 
 /* ---- search ------------------------------------------------------------
-   Plain substring matching fails the obvious cases: "eggs" does not occur in
-   "egg omelet or scrambled egg", and an alphabetical list truncated at 25 hides
-   whatever sorts late. So each name is reduced once, at load, to a bag of
-   crudely singularised tokens joined with spaces and padded at both ends —
-   " egg omelet or scrambled egg ". A word-prefix test is then a plain indexOf
-   of " " + token, which native code does far faster than any loop here, and the
-   offset it returns doubles as a position score.                            */
+   Ranking is by how closely the name matches what was typed, not by score
+   soup. Each name is reduced once, at load, to a comparison form: the leading
+   "Generic " dropped, punctuation flattened to spaces, lowercased. A query is
+   reduced the same way, then every candidate falls into exactly one tier:
+
+     exact -> exact but for a plural -> starts with, on a word boundary
+           -> starts with, mid-word -> contains it as a whole word
+           -> contains it anywhere -> every word present -> every word as a prefix
+
+   Within a tier the shorter name wins, so for "egg": "egg" then "eggs" then
+   "egg roll" then "egg salad sandwich, with lettuce". A twelve-word name that
+   happens to end with your two words cannot outrank a two-word name that starts
+   with them, whatever else is true about it.
+
+   Plurals are handled by matching the query and its s/es forms, not by stemming
+   everything: that keeps "eggs" close to "egg" without pulling "eggnog" in with
+   them.
+
+   One thing outranks string shape: having eaten it. Anything you have logged
+   before is lifted out of its tier into a band sitting just below the two exact
+   tiers, so a food already in your history beats a stranger that merely starts
+   with the same letters.                                                       */
+
+const cmpForm = name => String(name||"")
+  .replace(/^generic\s+/i, "")
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, " ")
+  .trim();
+
+// A crude singulariser, used only for the last-resort tier: it is what connects
+// "egg" to "scrambled eggs" when nothing closer matched.
 const TOKEN = /[a-z0-9]+/g;
 function singular(w){
   if(w.length > 4 && w.endsWith("ies")) return w.slice(0,-3) + "y";
@@ -1343,10 +1358,6 @@ function tokenize(str){
   return out;
 }
 const searchBlob = name => " " + tokenize(name).join(" ") + " ";
-// the unstemmed words too: "eggs" and "egg" stem alike, but someone typing the
-// plural usually wants the dish ("scrambled eggs") over the compound ("egg roll"),
-// and someone typing the singular usually wants the reverse
-const rawBlob = name => " " + (String(name||"").toLowerCase().match(TOKEN)||[]).join(" ") + " ";
 // "Generic chicken breast" files under C, not G — otherwise the whole library
 // collapses into one letter and the alphabetical list stops being useful
 const sortKey = f => String(f.name||"").replace(/^generic\s+/i, "").toLowerCase();
@@ -1366,10 +1377,9 @@ function libId(name){
 function decorate(f){
   f._n = normName(f.name);
   f._k = sortKey(f);
-  f._s = searchBlob(f.name);
-  f._r = rawBlob(f.name);
-  f._c = (f._s.trim() ? f._s.trim().split(" ").length : 0);   // how many words the name spends
-  f._g = /^generic\s/i.test(f.name || "");
+  f._m = cmpForm(f.name);                 // what search compares against
+  f._p = " " + f._m + " ";                // padded, so word-boundary tests are one indexOf
+  f._s = searchBlob(f.name);              // stemmed words, for the plural fallback only
   return f;
 }
 
@@ -1501,47 +1511,75 @@ function logStats(){
   return logStatsCache;
 }
 
-// every query token must match the start of some word in the name
-function scoreFood(f, q, raw, phrase, st){
-  let s = 0, matched = 0;
-  for(let k = 0; k < q.length; k++){
-    const t = q[k];
-    const i = f._s.indexOf(" " + t);
-    if(i < 0) return null;                                  // every word must match something
-    s += (f._s.indexOf(" " + t + " ") >= 0) ? 14 : 5;        // a whole word beats a prefix by a wide margin,
-    s += i === 0 ? 3 : (i < 14 ? 2 : 0);                    // so "egg" outranks "eggplant" and "Eggo"
-    if(f._r.indexOf(" " + raw[k] + " ") >= 0) s += 4;        // exact word as typed, plural and all
-    matched++;
-  }
-  if(q.length > 1 && f._s.indexOf(" " + phrase) >= 0) s += 8;   // the words appeared together, in order
-  s += 4 / (1 + Math.max(0, f._c - matched));                  // a name that says little else
-  s -= 0.05 * (f.name||"").length;
-  if(f._mine) s += 6;
-  if(f._g) s += 2;
-  s += st.score.get(f.id) || 0;
-  return s;
+// the query as typed, plus its singular and plural forms
+function queryForms(q){
+  const one = singular(q), out = [q];
+  const add = v => { if(v && out.indexOf(v) < 0) out.push(v); };
+  add(one); add(one + "s"); add(one + "es"); add(q + "s");
+  return out;
 }
 
+// Which tier a name falls into for this query; lower is closer, null is no match.
+// The words exactly as typed are exhausted before their singular/plural forms are
+// tried, so "eggs" reaches "scrambled eggs" before it reaches "egg roll".
+const TIER_NAMES = [
+  "exact", "exact but for a plural", "starts with what you typed",
+  "contains it as a word", "starts with it mid-word",
+  "starts with its singular or plural", "contains its singular or plural",
+  "contains it anywhere", "has every word", "has every word as a prefix",
+  "related word"
+];
+function foodTier(f, q, forms, words, stems){
+  const m = f._m, p = f._p;
+  if(m === q) return 0;
+  for(const v of forms) if(m === v) return 1;                          // "oats" for "oat"
+  if(m.startsWith(q) && m.charAt(q.length) === " ") return 2;          // "egg roll"
+  if(p.indexOf(" " + q + " ") >= 0) return 3;                          // "scrambled eggs" for "eggs"
+  if(m.startsWith(q)) return 4;                                        // "eggnog", "eggplant"
+  for(const v of forms)
+    if(m.startsWith(v) && m.charAt(v.length) === " ") return 5;
+  for(const v of forms) if(p.indexOf(" " + v + " ") >= 0) return 6;
+  if(m.indexOf(q) >= 0) return 7;
+  let all = true;
+  for(const w of words) if(p.indexOf(" " + w + " ") < 0){ all = false; break; }
+  if(all) return 8;                                                    // every word, any order
+  all = true;
+  for(const w of words) if(p.indexOf(" " + w) < 0){ all = false; break; }
+  if(all) return 9;                                                    // "chick brea"
+  all = true;
+  for(const w of stems) if(f._s.indexOf(" " + w) < 0){ all = false; break; }
+  return all ? 10 : null;                                              // berry/berries
+}
+
+// Foods you have logged before sit in a band of their own, immediately behind the
+// two exact tiers and ahead of everything ranked on string shape alone. Inside the
+// band the order is how often you have eaten it, then how close the match was.
+const LOGGED_BAND = 1.5;
+
 function searchFoods(term, limit){
-  const q = tokenize(term);
-  if(!q.length) return { total:0, list:[] };
-  const raw = (String(term||"").toLowerCase().match(TOKEN) || []).filter(w => w !== "generic");
-  while(raw.length < q.length) raw.push(q[raw.length]);
-  const phrase = q.join(" ");
+  const q = cmpForm(term);
+  if(!q) return { total:0, list:[], tier:null };
+  const words = q.split(" ");
+  const forms = queryForms(q);
+  const stems = tokenize(term);
   const all = allFoods(), st = logStats(), hits = [];
   for(let i = 0; i < all.length; i++){
-    const sc = scoreFood(all[i], q, raw, phrase, st);
-    if(sc !== null) hits.push([sc, all[i]]);
+    const f = all[i];
+    const t = foodTier(f, q, forms, words, stems);
+    if(t === null) continue;
+    const eaten = st.score.get(f.id) || 0;
+    hits.push([(t > 1 && eaten > 0) ? LOGGED_BAND : t, eaten, t, f]);
   }
-  if(!hits.length){
-    // nothing matched on word boundaries — fall back to a plain substring pass
-    const t = term.trim().toLowerCase();
-    for(let i = 0; i < all.length && hits.length < limit*4; i++){
-      if(all[i]._n.indexOf(t) >= 0) hits.push([0, all[i]]);
-    }
-  }
-  hits.sort((a,b) => b[0]-a[0] || a[1]._k.localeCompare(b[1]._k));
-  return { total: hits.length, list: hits.slice(0, limit).map(h => h[1]) };
+  // band, then how often you eat it, then how close the match is, then the shorter
+  // name, then alphabetical
+  hits.sort((a,b) =>
+    a[0] - b[0] ||
+    b[1] - a[1] ||
+    a[2] - b[2] ||
+    a[3]._m.length - b[3]._m.length ||
+    a[3]._k.localeCompare(b[3]._k));
+  return { total: hits.length, list: hits.slice(0, limit).map(h => h[3]),
+           tier: hits.length ? hits[0][2] : null };
 }
 function foodById(id){
   return (NUT().foods||[]).find(f=>f.id===id) || LIB_BY_ID.get(id) || null;
@@ -1617,9 +1655,11 @@ function dietFoods(){
     <button class="primary" style="margin-top:10px" onclick="addFood()">+ Add food</button>
   </div>`;
 
-  // search — the library is too long to scroll, so nothing lists until you type
+  // search — the library is too long to scroll, so it never lists on its own;
+  // your own foods are few and yours, so those always list
   const merged = allFoods();
   const total = merged.length;
+  const own = merged.filter(f => f._mine);
   if(total){
     h += `<input type="text" id="foodSearch" placeholder="Search ${total} foods…" value="${esc(foodSearch)}" oninput="setFoodSearch(this.value)" style="margin-bottom:12px">`;
   }
@@ -1629,7 +1669,13 @@ function dietFoods(){
   if(!total){
     // nothing saved yet — the add box and starter library above are the whole tab
   } else if(!term){
-    h += `<p class="sub" style="text-align:center;padding:8px 0">Type to find a food. ${total} available.</p>`;
+    if(own.length){
+      h += `<div class="lift" style="margin-bottom:8px"><h3>Your foods</h3><span class="last">${own.length}</span></div>`;
+      h += `<p class="sub" style="margin:0 0 12px">Foods you added or edited. The other ${total - own.length} come from the library — search to reach them.</p>`;
+      list = own;
+    } else {
+      h += `<p class="sub" style="text-align:center;padding:8px 0">Type to find a food. ${total} available, and anything you add shows up here.</p>`;
+    }
   } else {
     const res = searchFoods(foodSearch, FOOD_RESULTS);
     list = res.list;
@@ -1713,24 +1759,17 @@ function setFoodSearch(v){ foodSearch=v; render(); }
 function loadAiSettings(){
   try{
     aiKey = localStorage.getItem(AI_KEY_LS) || "";
-    aiModel = localStorage.getItem(AI_MODEL_LS) || "haiku";
+    localStorage.removeItem(AI_MODEL_LS);      // the model is no longer a setting
   }catch(e){}
 }
 function saveAiKey(){
-  const k = (document.getElementById("aiKeyInput").value || "").trim();
-  const m = document.getElementById("aiModelSelect").value;
-  aiKey = k; aiModel = m;
-  try{ localStorage.setItem(AI_KEY_LS, k); localStorage.setItem(AI_MODEL_LS, m); }catch(e){}
+  aiKey = (document.getElementById("aiKeyInput").value || "").trim();
+  try{ localStorage.setItem(AI_KEY_LS, aiKey); }catch(e){}
   aiSettingsOpen = false; scanMsg = ""; render();
 }
 function clearAiKey(){
   aiKey = "";
   try{ localStorage.removeItem(AI_KEY_LS); }catch(e){}
-  render();
-}
-function setAiModel(m){
-  aiModel = m;
-  try{ localStorage.setItem(AI_MODEL_LS, m); }catch(e){}
   render();
 }
 function toggleAiSettings(){ aiSettingsOpen = !aiSettingsOpen; render(); }
@@ -1767,15 +1806,15 @@ async function onScanFile(e){
   scanBusy = false; render();
 }
 
-async function callVision(img, desc){
-  const model = AI_MODELS[aiModel] || AI_MODELS.haiku;
-  const prompt =
+const SCAN_SYSTEM =
 `You estimate nutrition from a meal photo plus a short user description.
 Respond with ONLY a JSON object — no prose, no markdown fences — in exactly this shape:
 {"name": string, "grams": number, "calories": number, "protein_g": number, "carb_g": number, "fiber_g": number, "fat_g": number, "note": string}
-"grams" is your best estimate of the total edible weight shown. The macro numbers are totals for that whole portion. "fiber_g" is the dietary fiber contained within "carb_g", not in addition to it. Keep "note" under 12 words. If unsure, still give your best single estimate.
+"grams" is your best estimate of the total edible weight shown. The macro numbers are totals for that whole portion. "fiber_g" is the dietary fiber contained within "carb_g", not in addition to it. Keep "note" under 12 words. If unsure, still give your best single estimate.`;
 
-User description: ${desc || "(none provided)"}`;
+// The role and the output contract are identical on every call, so they belong in
+// `system`. Only the photo and the typed description vary, so only those are messages.
+async function callVision(img, desc){
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1785,11 +1824,12 @@ User description: ${desc || "(none provided)"}`;
       "anthropic-dangerous-direct-browser-access": "true"
     },
     body: JSON.stringify({
-      model,
+      model: AI_MODEL,
       max_tokens: 400,
+      system: SCAN_SYSTEM,
       messages: [{ role:"user", content: [
         { type:"image", source:{ type:"base64", media_type: img.mediaType, data: img.data } },
-        { type:"text", text: prompt }
+        { type:"text", text: "User description: " + (desc || "(none provided)") }
       ]}]
     })
   });
@@ -1816,7 +1856,7 @@ User description: ${desc || "(none provided)"}`;
 async function runScan(){
   if(!aiKey){ scanMsg = "Enter your API key first (⚙)."; render(); return; }
   if(!scanImg){ scanMsg = "Add a photo first."; render(); return; }
-  scanBusy = true; scanMsg = "Analyzing with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
+  scanBusy = true; scanMsg = "Analyzing with " + AI_LABEL + "…"; render();
   try{
     const r = await callVision(scanImg, scanDesc);
     scanResult = r;
@@ -1846,7 +1886,22 @@ Deliver, in clear structured sections with short headers:
 2. What's working / what's not.
 3. Recommendations — be concrete and numeric: suggest specific calorie and macronutrient target ranges (give numbers), training adjustments (volume, exercise selection, progression, frequency), and recovery. Tie advice to their stated goals.
 
-Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. Be direct and avoid filler. Keep the whole response concise and readable on a phone — aim for roughly 400–600 words, and always finish every section rather than cutting off.`;
+Programming standards — apply these as your defaults, and say so when you deviate for a reason. They are reference, not a script: cite only the parts that bear on what you are recommending, and never recite the whole framework back.
+
+Diet phases:
+- A fat loss phase targets 0.5–1% of total bodyweight lost per week, runs 8–12 weeks, and gives up no more than 10% of total bodyweight in one run. Follow it with 4–8 weeks at maintenance, then 1–2 weeks of active rest.
+- A muscle gain phase runs 8–20 weeks, followed by a 3–6 week minicut. That gain-then-minicut cycle can repeat up to twice. After it: 1–2 weeks of active rest or 3–4 weeks at maintenance, then a 4–8 week fat loss phase.
+- Rate of gain during a surplus depends on training age. First year of training: about 2% of bodyweight per month on a 300–500 kcal surplus. Intermediate: about 1% per month. Advanced, meaning five or more years of consistent training: about 0.5% per month.
+- Macros have exactly two hard floors: fat at least 0.3 g per lb of bodyweight, and protein between 0.7 and 1 g per lb. Everything left over is carbs versus fat by preference — do not present a particular split as though it were required.
+- When they change phase, tell them to expect a water weight shift. Moving from a deficit to maintenance typically adds a couple to a few pounds within the first week; their true maintenance weight is what the scale settles at after that spike, not the number on the last day of the deficit.
+- While in a deficit or a surplus, adjust calories against observed rate of change and activity, and name the confound when you see one. If weight is dropping faster than target and step count has climbed at the same time, say so and offer both levers: fewer steps, or more calories.
+
+Training:
+- Build around compound lifts, and train every major muscle group each week. If they name muscle groups to prioritize, build the program around that priority — and still insist every group gets trained to some degree.
+- Sets of 5–10 hard reps with good form serve both strength and hypertrophy. Beginners need not train to failure and should average roughly 3–5 reps in reserve. Once they are intermediate, they can skew higher-rep for size or lower-rep for strength.
+- Rotate exercise selection every 8–12 weeks.
+
+Rules: The logged data are estimates (portion sizes, photo-based calories), so calibrate confidence and say so. You are not a substitute for in-person medical care. If you notice red flags — pain/injury patterns, signs of disordered eating, or rapid unexplained weight change — respond supportively and recommend they consult a qualified professional rather than pushing numeric targets. This overrides the programming standards above: do not prescribe a deficit, a rate of loss, or any other number into that situation. Be direct and avoid filler. Keep the whole response concise and readable on a phone — aim for roughly 450–650 words, and always finish every section rather than cutting off.`;
 
 function linRateWk(pts){
   if(pts.length < 2) return null;
@@ -1966,7 +2021,7 @@ function buildCoachContext(hist){
 }
 
 async function callCoach(messages, maxTokens){
-  const model = AI_MODELS[aiModel] || AI_MODELS.haiku;
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method:"POST",
     headers:{
@@ -1975,7 +2030,7 @@ async function callCoach(messages, maxTokens){
       "anthropic-version":"2023-06-01",
       "anthropic-dangerous-direct-browser-access":"true"
     },
-    body: JSON.stringify({ model, max_tokens: maxTokens||1400, system: COACH_SYSTEM, messages })
+    body: JSON.stringify({ model: AI_MODEL, max_tokens: maxTokens||1400, system: COACH_SYSTEM, messages })
   });
   if(!res.ok){
     let msg = "HTTP " + res.status;
@@ -2009,7 +2064,7 @@ async function runAnalysis(force){
   if(!aiKey){ coachMsg = "Set your API key on the Diet → Foods tab (⚙) first."; render(); return; }
   if(!force && lockDaysLeft() > 0){ coachMsg = `Next analysis unlocks in ${lockDaysLeft()} day(s).`; render(); return; }
   const hist = coachArchive();     // includes the analysis currently on screen
-  coachBusy = true; coachMsg = "Analyzing your history with " + (AI_LABEL[aiModel]||"AI") + "…"; render();
+  coachBusy = true; coachMsg = "Analyzing your history with " + AI_LABEL + "…"; render();
   try{
     const messages = [{ role:"user", content: buildCoachContext(hist) + "\n\nAs my coach, give me a full progress analysis and evidence-based, sustainable recommendations for a healthy adult pursuing general fitness and body-composition goals." }];
     const reply = await callCoach(messages, 25000);
