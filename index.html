@@ -3168,8 +3168,12 @@ async function cloudBackup(manual){
       headers: { "content-type":"application/json", "x-gym-code": syncCode },
       body: payload
     });
-    const out = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(out.error || ("HTTP " + res.status));
+    const out = await res.json().catch(()=>null);
+    if(!res.ok) throw new Error((out && out.error) || ("HTTP " + res.status));
+    /* A 2xx is not enough. If the Worker is not deployed, this path falls through to the
+       static files and can answer 200 with the app's own HTML — which would otherwise be
+       recorded as a successful backup. Only the Worker sends back ok + date. */
+    if(!out || out.ok !== true || !out.date) throw new Error("no confirmation from the server — is the Worker deployed?");
     syncDirty = false;
     syncList = null;                                     // the date list just changed
     syncState = { at: Date.now(), ok: true, msg: `${Math.round(payload.length/1024)} KB` };
@@ -3186,9 +3190,10 @@ async function cloudRefreshList(){
   syncBusy = true; err = ""; note = "";
   try{
     const res = await fetch(SYNC_URL, { headers:{ "x-gym-code": syncCode } });
-    const out = await res.json();
-    if(!res.ok) throw new Error(out.error || ("HTTP " + res.status));
-    syncList = out.backups || [];
+    const out = await res.json().catch(()=>null);
+    if(!res.ok) throw new Error((out && out.error) || ("HTTP " + res.status));
+    if(!out || !Array.isArray(out.backups)) throw new Error("no backup list came back — is the Worker deployed?");
+    syncList = out.backups;
     if(!syncList.length) note = "No cloud backups yet under that access code.";
   }catch(e){ err = "Couldn't reach the cloud backup: " + ((e && e.message) || e); }
   syncBusy = false;
