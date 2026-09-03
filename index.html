@@ -225,16 +225,16 @@ let aiKey = "";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-const SCHEMA = 12;  // bump whenever the saved data shape changes, and add a migration below
+const SCHEMA = 13;  // bump whenever the saved data shape changes, and add a migration below
 const SCRATCH_KEY = "gymlog.scratch.v1";   // the hot path: rewritten while you type a set, kept out of the main blob
-const LIB_KEY = "gymlog.lib.v1";           // offline mirror of starter-foods.json; never inside D or a backup
+const LIB_STALE_KEY = "gymlog.lib.v1";     // retired in v13; removed on load to reclaim the space
 const SAVE_DEBOUNCE = 500;                 // ms — coalesce keystroke writes
-const LIB_MIRROR_MAX = 400000;             // don't mirror a library larger than this; fall back to the HTTP cache
 const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80, fbMin:25, fbMax:40 };
 const EMPTY = {
   schema:SCHEMA,
   templates:[{id:"A",name:"Workout A",exercises:[]},{id:"B",name:"Workout B",exercises:[]}],
   sessions:[], weights:[], photos:[], lastBackup:null,
+  phase:null, phases:[], mealTemplates:[],
   scratch:{},
   coach:{ goals:"", lastRun:null, current:null, history:[] },
   nutrition:{ targets:{...DEFAULT_TARGETS}, foods:[], log:{}, hidden:[] }
@@ -383,6 +383,14 @@ const MIGRATIONS = {
       });
     });
     return d;
+  },
+  // 12 -> 13: a training phase you are currently in, an archive of finished ones, and
+  // saved meal templates. All three start empty; nothing existing is touched.
+  12(d){
+    if(!("phase" in d)) d.phase = null;
+    if(!Array.isArray(d.phases)) d.phases = [];
+    if(!Array.isArray(d.mealTemplates)) d.mealTemplates = [];
+    return d;
   }
 };
 
@@ -400,6 +408,8 @@ function migrate(raw){
   }
   d.schema = SCHEMA;
   if(d.nutrition && !Array.isArray(d.nutrition.hidden)) d.nutrition.hidden = [];
+  if(!Array.isArray(d.phases)) d.phases = [];
+  if(!Array.isArray(d.mealTemplates)) d.mealTemplates = [];
   return d;
 }
 
@@ -921,6 +931,8 @@ function viewWeight(){
     ${delta!==null ? `<span class="mono" style="font-size:13px;color:${delta<0?"var(--good)":"var(--dim)"}">${delta>0?"+":""}${delta.toFixed(1)} lb since start</span>` : ""}
   </div>
   ${chartSVG()}
+  ${phaseCard()}
+  ${tdeeCard()}
   <div class="card">
     <div class="row" style="margin-bottom:12px">
       <input type="date" id="wDate" class="grow" value="${today()}">
@@ -941,6 +953,259 @@ function viewWeight(){
   return h;
 }
 
+/* ============ training phases ============
+   The coach works in phases — fat loss, muscle gain, maintenance, active rest —
+   each with a duration and a target rate of weight change. Holding the current
+   phase in the data lets the app check the rate against the target instead of
+   leaving the coach to infer intent from a trend line.
+
+   Rates are stored as a percent of bodyweight per week, whatever units the phase
+   is normally discussed in, so every comparison is one subtraction. Gain targets
+   are quoted per month by convention and converted on the way in.               */
+const WK_PER_MONTH = 4.345;
+const PHASES = {
+  cut:      { label:"Fat loss",     weeks:[8,12], dir:-1, lo:0.5,  hi:1.0 },
+  gain:     { label:"Muscle gain",  weeks:[8,20], dir:1 },   // rate comes from training age
+  maintain: { label:"Maintenance",  weeks:[4,8],  dir:0, lo:0, hi:0.25 },
+  rest:     { label:"Active rest",  weeks:[1,2],  dir:0, lo:0, hi:0.25 }
+};
+const GAIN_LEVELS = {
+  beginner:     { label:"Beginner — first year",   perMonth:2.0 },
+  intermediate: { label:"Intermediate",            perMonth:1.0 },
+  advanced:     { label:"Advanced — 5+ years",     perMonth:0.5 }
+};
+const CUT_MAX_LOSS_PCT = 10;     // of starting bodyweight, in one run
+
+function latestWeight(){
+  const asc = [...D.weights].sort((a,b)=>a.date.localeCompare(b.date));
+  return asc.length ? asc[asc.length-1] : null;
+}
+
+function startPhase(type, level){
+  const def = PHASES[type];
+  if(!def) return;
+  const w = latestWeight();
+  if(!w){ err = "Log a bodyweight first — a phase needs a starting point."; render(); return; }
+  if(D.phase) endPhase(true);
+  let lo = def.lo, hi = def.hi;
+  if(type === "gain"){
+    const g = GAIN_LEVELS[level] || GAIN_LEVELS.intermediate;
+    const target = g.perMonth / WK_PER_MONTH;
+    lo = target*0.6; hi = target*1.4;          // a band around the target, not a knife edge
+  }
+  D.phase = { id:"ph"+Date.now(), type, level: type==="gain" ? (level||"intermediate") : null,
+              start: today(), startWeight: +w.value, loPctWk: lo, hiPctWk: hi };
+  save(); render();
+}
+
+function endPhase(silent){
+  if(!D.phase) return;
+  if(!silent && !confirm("End this phase? It moves to your history and the coach can still see it.")) return;
+  const w = latestWeight();
+  D.phases.push(Object.assign({}, D.phase, { end: today(), endWeight: w ? +w.value : null }));
+  if(D.phases.length > 12) D.phases = D.phases.slice(-12);
+  D.phase = null;
+  if(!silent){ save(); render(); }
+}
+
+// observed rate across the phase so far, with its uncertainty
+function phaseProgress(ph){
+  if(!ph) return null;
+  const startMs = pd(ph.start).getTime(), end = pd(today()).getTime();
+  const weeks = Math.max(0, (end - startMs)/6048e5);
+  const pts = weightsIn(startMs - 864e5, end);
+  const fit = pts.length >= 3 ? ols(pts) : null;
+  const w = latestWeight();
+  const now = w ? +w.value : null;
+  const changed = now != null ? now - ph.startWeight : null;
+  const loLb = ph.loPctWk/100 * ph.startWeight, hiLb = ph.hiPctWk/100 * ph.startWeight;
+  const perWeek = fit ? fit.slope*7 : (weeks > 0.5 && changed != null ? changed/weeks : null);
+  const dir = PHASES[ph.type] ? PHASES[ph.type].dir : 0;
+  // signed so that "toward the goal" is always positive
+  const toward = perWeek == null ? null : (dir === 0 ? -Math.abs(perWeek) : dir*perWeek);
+  return {
+    weeks, perWeek, toward, changed, now, loLb, hiLb, dir,
+    se: fit ? fit.se*7 : null,
+    pctChanged: changed != null ? Math.abs(changed)/ph.startWeight*100 : null
+  };
+}
+
+function phaseWarnings(ph, pr){
+  const def = PHASES[ph.type], out = [];
+  if(!pr) return out;
+  if(pr.weeks > def.weeks[1])
+    out.push(`Week ${Math.floor(pr.weeks)+1} — past the ${def.weeks[1]}-week mark for a ${def.label.toLowerCase()} phase.`);
+  if(ph.type === "cut" && pr.pctChanged != null && pr.changed < 0 && pr.pctChanged >= CUT_MAX_LOSS_PCT)
+    out.push(`Down ${pr.pctChanged.toFixed(1)}% of starting bodyweight — at or past the ${CUT_MAX_LOSS_PCT}% a single phase should give up.`);
+  if(pr.toward != null && pr.weeks >= 2){
+    if(pr.dir !== 0 && pr.toward > pr.hiLb) out.push(`Moving ${Math.abs(pr.perWeek).toFixed(2)} lb/week, faster than the ${pr.hiLb.toFixed(2)} lb top of the target band.`);
+    if(pr.dir !== 0 && pr.toward < pr.loLb) out.push(`Moving ${Math.abs(pr.perWeek).toFixed(2)} lb/week, under the ${pr.loLb.toFixed(2)} lb bottom of the band.`);
+    if(pr.dir === 0 && Math.abs(pr.perWeek) > pr.hiLb) out.push(`Drifting ${Math.abs(pr.perWeek).toFixed(2)} lb/week — more than a maintenance block should.`);
+  }
+  return out;
+}
+
+function phaseCard(){
+  const ph = D.phase;
+  if(!ph){
+    let h = `<div class="card">
+      <div class="lift"><h3>Phase</h3><span class="last">none running</span></div>
+      <p class="sub" style="margin:6px 0 10px">Start one and the app tracks week count, target rate and total change against it, and the coach stops having to guess what you are doing.</p>
+      <div class="row" style="flex-wrap:wrap">
+        <button class="ghost grow" onclick="startPhase('cut')">Fat loss</button>
+        <button class="ghost grow" onclick="pickGainLevel()">Muscle gain</button>
+      </div>
+      <div class="row" style="flex-wrap:wrap;margin-top:8px">
+        <button class="ghost grow" onclick="startPhase('maintain')">Maintenance</button>
+        <button class="ghost grow" onclick="startPhase('rest')">Active rest</button>
+      </div>`;
+    if(D.phases.length){
+      const last = D.phases[D.phases.length-1];
+      const d = PHASES[last.type];
+      h += `<p class="sub" style="margin-top:10px">Last: ${d?d.label:last.type}, ${last.start} to ${last.end}${
+        last.endWeight!=null ? `, ${last.startWeight} → ${last.endWeight} lb` : ""}.</p>`;
+    }
+    return h + `</div>`;
+  }
+  const def = PHASES[ph.type], pr = phaseProgress(ph);
+  const wk = Math.floor(pr.weeks) + 1;
+  const arrow = def.dir < 0 ? "−" : def.dir > 0 ? "+" : "±";
+  let h = `<div class="card">
+    <div class="lift"><h3>${def.label}</h3><span class="last">week ${wk} of ${def.weeks[0]}–${def.weeks[1]}</span></div>
+    <div class="sub" style="margin-top:8px;line-height:1.7">
+      Started ${shortD(ph.start)} at ${ph.startWeight} lb${ph.level ? ` · ${GAIN_LEVELS[ph.level].label.toLowerCase()}` : ""}<br>
+      Target ${arrow}${pr.loLb.toFixed(2)}–${pr.hiLb.toFixed(2)} lb/week${
+        ph.type==="gain" ? ` (${GAIN_LEVELS[ph.level].perMonth}% of bodyweight a month)` :
+        ph.type==="cut" ? ` (${ph.loPctWk}–${ph.hiPctWk}% of bodyweight a week)` : ""}<br>
+      ${pr.perWeek != null
+        ? `Actual ${pr.perWeek>0?"+":""}${pr.perWeek.toFixed(2)} lb/week${pr.se!=null?` ± ${pr.se.toFixed(2)}`:""}`
+        : "Actual — not enough weigh-ins yet"}${
+        pr.changed != null ? ` · ${pr.changed>0?"+":""}${pr.changed.toFixed(1)} lb overall (${pr.pctChanged.toFixed(1)}%)` : ""}
+    </div>`;
+  phaseWarnings(ph, pr).forEach(w => {
+    h += `<p class="sub" style="margin-top:8px;color:var(--bad)">${esc(w)}</p>`;
+  });
+  return h + `<button class="ghost" style="margin-top:10px" onclick="endPhase()">End this phase</button></div>`;
+}
+
+function pickGainLevel(){
+  const keys = Object.keys(GAIN_LEVELS);
+  const msg = "How long have you been training consistently?\n\n"
+    + keys.map((k,i)=>`${i+1}. ${GAIN_LEVELS[k].label} — aim for ${GAIN_LEVELS[k].perMonth}% of bodyweight a month`).join("\n")
+    + "\n\nEnter 1, 2 or 3:";
+  const a = prompt(msg, "2");
+  const i = parseInt(a, 10);
+  if(!(i >= 1 && i <= keys.length)) return;
+  startPhase("gain", keys[i-1]);
+}
+
+/* ============ maintenance calories ============
+   Inverting the energy balance over a window: TDEE = mean intake - k*(lb/week)/7,
+   with the weight slope signed, so losing adds and gaining subtracts. k is the
+   energy density of the tissue moved — adipose is around 3500 kcal/lb, mixed lean
+   gain nearer 3000 because lean tissue is mostly water.
+
+   The constant is not what limits this. Precision is: the standard error of a
+   fitted slope falls roughly as T^1.5, so three weeks of a slow bulk gives an
+   error bar wider than the signal. So the window is chosen by the confidence it
+   buys rather than by which phase you happen to be in, and no number is presented
+   as usable until the interval is tight enough to act on.                        */
+const K_LOSS = 3500, K_GAIN = 3000;        // kcal per lb of tissue
+const TDEE_WINDOWS = [21, 28, 42, 56, 70, 84];
+const TDEE_SE_TARGET = 100;                // kcal/day — the bar for calling it usable
+const TDEE_MIN_WEIGHTS = 8, TDEE_MIN_DAYS = 14, TDEE_MIN_COVERAGE = 0.6;
+
+// ordinary least squares through {x: day, y: lb}, returning the slope and its
+// standard error; raw weigh-ins, never the EWMA, whose smoothing would understate it
+function ols(pts){
+  const n = pts.length;
+  if(n < 3) return null;
+  let sx = 0, sy = 0;
+  pts.forEach(p => { sx += p.x; sy += p.y; });
+  const mx = sx/n, my = sy/n;
+  let sxx = 0, sxy = 0;
+  pts.forEach(p => { sxx += (p.x-mx)*(p.x-mx); sxy += (p.x-mx)*(p.y-my); });
+  if(sxx <= 0) return null;
+  const b = sxy/sxx, a = my - b*mx;
+  let ss = 0;
+  pts.forEach(p => { const r = p.y - (a + b*p.x); ss += r*r; });
+  const s2 = ss/(n-2);
+  return { slope:b, se: Math.sqrt(s2/sxx), n };
+}
+
+function weightsIn(fromMs, toMs){
+  return D.weights
+    .map(w => ({ t: pd(w.date).getTime(), y: +w.value }))
+    .filter(w => w.t > fromMs && w.t <= toMs && isFinite(w.y))
+    .sort((a,b) => a.t - b.t)
+    .map(w => ({ x: (w.t - fromMs)/864e5, y: w.y }));
+}
+
+function tdeeOver(days){
+  const end = pd(today()).getTime(), start = end - days*864e5;
+  const pts = weightsIn(start, end);
+  if(pts.length < TDEE_MIN_WEIGHTS) return null;
+  const fit = ols(pts);
+  if(!fit) return null;
+
+  const logged = [];
+  for(let i = 1; i <= days; i++){
+    const ds = iso(new Date(start + i*864e5));
+    if(dayEntries(ds).length) logged.push(ds);
+  }
+  if(logged.length < TDEE_MIN_DAYS) return null;
+  const intake = logged.reduce((a,ds) => a + dayTotals(ds).cal, 0) / logged.length;
+
+  const perWeek = fit.slope*7, seWeek = fit.se*7;
+  const k = perWeek < 0 ? K_LOSS : K_GAIN;
+  return {
+    days, weighIns: pts.length, loggedDays: logged.length, coverage: logged.length/days,
+    perWeek, seWeek, intake, k,
+    tdee: intake - k*perWeek/7,
+    se: k*seWeek/7
+  };
+}
+
+// shortest window that clears the confidence bar; failing that, the longest one
+// there is data for, shown as not yet usable
+function tdeeEstimate(){
+  let longest = null;
+  for(const d of TDEE_WINDOWS){
+    const r = tdeeOver(d);
+    if(!r) continue;
+    longest = r;
+    if(r.coverage >= TDEE_MIN_COVERAGE && r.se <= TDEE_SE_TARGET)
+      return Object.assign(r, { confident:true });
+  }
+  return longest ? Object.assign(longest, { confident:false }) : null;
+}
+
+function tdeeCard(){
+  const e = tdeeEstimate();
+  if(!e) return `<div class="card">
+    <div class="lift"><h3>Maintenance calories</h3><span class="last">not yet</span></div>
+    <p class="sub" style="margin-top:8px">Measured from your own data rather than a formula, once there is enough of it: at least ${TDEE_MIN_WEIGHTS} weigh-ins and ${TDEE_MIN_DAYS} logged days inside the same three weeks.</p>
+  </div>`;
+  const rate = e.perWeek;
+  const dir = rate < -0.05 ? "losing" : rate > 0.05 ? "gaining" : "holding";
+  const body = `<div class="sub" style="margin-top:8px;line-height:1.6">
+      Over the last ${e.days} days: ${e.weighIns} weigh-ins, ${e.loggedDays} logged days (${Math.round(e.coverage*100)}%).<br>
+      Averaging ${commas(Math.round(e.intake))} cal a day while ${dir} ${Math.abs(rate).toFixed(2)} lb/week.
+    </div>`;
+  if(e.confident) return `<div class="card">
+    <div class="lift"><h3>Maintenance calories</h3><span class="last">±${Math.round(e.se)}</span></div>
+    <h2 class="mono" style="margin:6px 0 0">${commas(Math.round(e.tdee/10)*10)} <span class="sub" style="font-size:13px">cal/day</span></h2>
+    ${body}
+    <p class="sub" style="margin-top:8px;color:var(--dimmer)">Assumes ${e.k} cal per lb of tissue moved. Your logging bias mostly cancels: if you under-record intake, this reads low by the same amount, so a deficit set against it still comes out about right.</p>
+  </div>`;
+  return `<div class="card">
+    <div class="lift"><h3>Maintenance calories</h3><span class="last">too noisy</span></div>
+    <h2 class="mono" style="margin:6px 0 0;color:var(--dim)">~${commas(Math.round(e.tdee/10)*10)} <span class="sub" style="font-size:13px">± ${Math.round(e.se)} cal/day</span></h2>
+    ${body}
+    <p class="sub" style="margin-top:8px;color:var(--dimmer)">The error bar is wider than ${TDEE_SE_TARGET} cal, so this is not worth acting on yet. It narrows quickly: the uncertainty on a weight trend falls faster than the window grows, and a slow gain needs six to eight weeks before the signal clears the noise.</p>
+  </div>`;
+}
+
 /* ============ backup view ============ */
 /* What is actually on disk, and how fast it is filling up. Safari caps localStorage at
    about 5 MB of text per origin; WebKit bills UTF-16, so the worst case is 2.5 M
@@ -951,7 +1216,7 @@ const kb = n => n < 1024 ? n + " B" : (n/1024).toFixed(n < 102400 ? 1 : 0) + " K
 
 function storageStats(){
   const len = k => { try{ const v = localStorage.getItem(k); return v ? v.length : 0; }catch(e){ return 0; } };
-  const core = len(KEY), scratch = len(SCRATCH_KEY), lib = len(LIB_KEY);
+  const core = len(KEY), scratch = len(SCRATCH_KEY);
   const log = JSON.stringify(NUT().log||{}).length;
   const sessions = JSON.stringify(D.sessions||[]).length;
   const foods = JSON.stringify(NUT().foods||[]).length;
@@ -962,8 +1227,8 @@ function storageStats(){
   const first = [days[0], sdates[0]].filter(Boolean).sort()[0];
   const span = first ? Math.max(1, (pd(today()) - pd(first))/864e5) : 0;
   const perDay = span ? (log + sessions) / span : 0;
-  const left = STORAGE_BUDGET - (core + scratch + lib);
-  return { core, scratch, lib, log, sessions, foods, total:core+scratch+lib, perDay,
+  const left = STORAGE_BUDGET - (core + scratch);
+  return { core, scratch, log, sessions, foods, total:core+scratch, perDay,
            years: perDay > 0 ? left / perDay / 365 : null };
 }
 
@@ -978,8 +1243,7 @@ function storageCard(){
     <div class="bar" style="margin:10px 0 8px"><div style="width:${Math.max(pct,0.5)}%;background:var(--accent)"></div></div>
     <div class="sub">${kb(st.total)} of a ${(STORAGE_BUDGET/1048576).toFixed(1)} MB budget</div>
     <div class="sub" style="margin-top:8px;line-height:1.6">
-      diet log ${kb(st.log)} · training ${kb(st.sessions)} · your foods ${kb(st.foods)}<br>
-      library mirror ${kb(st.lib)} (outside your data) · in progress ${kb(st.scratch)}
+      diet log ${kb(st.log)} · training ${kb(st.sessions)} · your foods ${kb(st.foods)} · in progress ${kb(st.scratch)}
     </div>
     <p class="sub" style="margin-top:8px;line-height:1.5">${life}</p>
     <p class="sub" style="margin-top:8px;line-height:1.5;color:var(--dimmer)">Safari allows roughly 5 MB of text per site and may count each character as two bytes, so this compares against the pessimistic 2.5 MB. Exports are unaffected by the limit.</p>
@@ -1044,7 +1308,8 @@ let foodFilter = "";
 let foodSearch = "";              // search in the Foods management list
 // AI meal scan state (all transient, none saved to D)
 let aiSettingsOpen = false;
-let scanImg = null;               // {data, mediaType}
+let scanImgs = [];                // up to SCAN_MAX_IMGS of {data, mediaType}
+let scanMode = "meal";            // meal | recipe | label
 let scanDesc = "";
 let scanBusy = false;
 let scanMsg = "";
@@ -1221,6 +1486,9 @@ function dietDay(){
         h += `<div class="copyrow"><button class="ghost" onclick="copyYesterdayMeal('${meal}')">＋ Copy yesterday's ${meal} (${yCount})</button>
           <div class="sub" style="text-align:center;margin-top:6px">or swipe right on this meal</div></div>`;
       }
+      if(entries.length > 1 && addingMeal !== meal){
+        h += `<div class="copyrow"><button class="ghost" onclick="saveMealTemplate('${meal}')">Save these ${entries.length} as a template</button></div>`;
+      }
       if(addingMeal===meal) h += addPicker(meal);
     }
     h += `</div>`;
@@ -1234,8 +1502,15 @@ function recentFoodIds(n){ return logStats().order.slice(0, n); }
 
 function addPicker(meal){
   const all = allFoods(), term = foodFilter.trim().toLowerCase();
-  let h = `<div class="addbox">
-    <input type="text" id="dietFilter" placeholder="Search foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
+  let h = `<div class="addbox">`;
+  const tpls = D.mealTemplates || [];
+  if(tpls.length && !term){
+    h += `<div class="sub" style="margin-bottom:6px">Templates</div>
+      <div class="row" style="flex-wrap:wrap;margin-bottom:10px">` + tpls.map(t =>
+        `<button class="ghost" style="flex:0 1 auto" onclick="applyMealTemplate('${t.id}','${meal}')">${esc(t.name)} <span class="sub">· ${t.items.length}</span></button>`
+      ).join("") + `</div>`;
+  }
+  h += `<input type="text" id="dietFilter" placeholder="Search foods…" value="${esc(foodFilter)}" oninput="setFoodFilter(this.value)">`;
   let foods = [], heading = "";
   if(!all.length){
     h += `<p class="sub" style="margin-top:8px">${libState==="loading" ? "Loading the food library…" : "No foods yet. Add some on the Foods tab first."}</p>`;
@@ -1281,17 +1556,31 @@ function aiScanCard(){
 
   // key present: scan controls
   h += `<div class="sub" style="margin:6px 0 10px">Model: ${AI_LABEL} · roughly a cent per scan</div>`;
+  h += `<div class="row" style="margin-bottom:10px">` + SCAN_MODES.map(([k,label]) =>
+    `<button class="${scanMode===k?"primary":"ghost"} grow" onclick="setScanMode('${k}')">${label}</button>`).join("") + `</div>`;
+
   h += `<input type="file" accept="image/*" id="scanFile" class="hide" onchange="onScanFile(event)">`;
-  if(!scanImg){
-    h += `<button class="ghost" onclick="document.getElementById('scanFile').click()">${scanBusy?"…":"Choose or take a photo"}</button>`;
-  } else {
-    h += `<img src="data:${scanImg.mediaType};base64,${scanImg.data}" alt="meal" style="width:100%;max-height:200px;object-fit:cover;border-radius:8px;margin-bottom:8px">
-      <input type="text" id="scanDesc" placeholder="Short description, e.g. chicken bowl ~2 cups" value="${esc(scanDesc)}" oninput="setScanDesc(this.value)" style="margin-bottom:8px">
-      <div class="row">
-        <button class="primary grow" ${scanBusy?"disabled":""} onclick="runScan()">${scanBusy?"Working…":"Estimate nutrition"}</button>
-        <button class="ghost" onclick="document.getElementById('scanFile').click()">Retake</button>
-      </div>`;
+  if(scanImgs.length){
+    h += `<div class="row" style="margin-bottom:8px">` + scanImgs.map((im,i) =>
+      `<img src="data:${im.mediaType};base64,${im.data}" alt="scan ${i+1}" onclick="dropScanImg(${i})"
+            style="flex:1;min-width:0;height:96px;object-fit:cover;border-radius:8px">`).join("") + `</div>`;
+    if(scanImgs.length > 1) h += `<p class="sub" style="margin:0 0 8px">Tap an image to remove it.</p>`;
   }
+
+  const multiline = scanMode === "recipe";
+  h += multiline
+    ? `<textarea id="scanDesc" rows="3" placeholder="Paste the recipe here, or photograph it above and use this box for what you changed — e.g. used 2 lb chicken not 1, skipped the butter, made 6 servings" oninput="setScanDesc(this.value)" style="margin-bottom:8px">${esc(scanDesc)}</textarea>`
+    : `<input type="text" id="scanDesc" placeholder="${scanMode==="label"?"Anything the panel cuts off, e.g. serving is 2 cookies":"Short description, e.g. chicken bowl ~2 cups"}" value="${esc(scanDesc)}" oninput="setScanDesc(this.value)" style="margin-bottom:8px">`;
+
+  const canRun = scanImgs.length > 0 || (scanMode === "recipe" && scanDesc.trim().length > 20);
+  h += `<div class="row">
+    ${scanImgs.length < SCAN_MAX_IMGS ? `<button class="ghost grow" onclick="document.getElementById('scanFile').click()">${scanImgs.length?"Add another":"Choose or take a photo"}</button>` : ""}
+    ${canRun ? `<button class="primary grow" ${scanBusy?"disabled":""} onclick="runScan()">${scanBusy?"Working…":"Estimate nutrition"}</button>` : ""}
+  </div>`;
+  if(scanMode === "recipe")
+    h += `<p class="sub" style="margin-top:8px">Reads the ingredients, converts volumes to weights, and divides by the serving count. You get one serving by weight, so a bigger or smaller portion scales from it. Anything you type about changes you made overrides the recipe.</p>`;
+  if(scanMode === "label")
+    h += `<p class="sub" style="margin-top:8px">Transcribes the panel rather than estimating, so this is the most accurate of the three. Get the serving size line in the shot.</p>`;
   if(scanMsg) h += `<p class="sub" style="margin-top:8px;color:${scanMsg.startsWith("Scan failed")?"var(--bad)":"var(--good)"}">${esc(scanMsg)}</p>`;
   return h + `</div>`;
 }
@@ -1305,7 +1594,7 @@ function aiScanCard(){
 let LIB = [];                         // in-memory library rows, pre-sorted
 let LIB_BY_ID = new Map();
 let libState = "idle";                // idle | loading | ready | error
-let libMsg = "", libFrom = "";        // "network" | "cache"
+let libMsg = "", libFrom = "";
 let libDropped = null;                // rows reconcileSeeds() removed on this load
 const SEED_URL = "starter-foods.json";
 const FOOD_RESULTS = 25;              // max food cards rendered for one search
@@ -1413,24 +1702,15 @@ async function loadLibrary(force){
     if(!rows.length) throw new Error("the file contained no foods");
     buildLib(rows);
     libFrom = "network";
-    const text = JSON.stringify(rows);
-    try{
-      if(text.length <= LIB_MIRROR_MAX) localStorage.setItem(LIB_KEY, text);
-      else localStorage.removeItem(LIB_KEY);          // too big to mirror; the HTTP cache covers offline
-    }catch(e){}
     const dropped = reconcileSeeds();
     if(dropped) libDropped = dropped;          // stay quiet when there was nothing to do
     libState = "ready";
   }catch(ex){
-    let ok = false;
-    try{
-      const cached = localStorage.getItem(LIB_KEY);
-      if(cached){ buildLib(JSON.parse(cached)); libFrom = "cache"; ok = true; const n = reconcileSeeds(); if(n) libDropped = n; }
-    }catch(e){}
-    libState = ok ? "ready" : "error";
-    libMsg = ok
-      ? "Offline — using the copy stored on this device."
-      : "Couldn't load the library (" + ex.message + "). It has to be served next to index.html; it won't load from a local file preview.";
+    // No local mirror: the app itself has to come off the network anyway, so a copy
+    // in localStorage only covered the case where the HTTP cache kept index.html and
+    // dropped the JSON — narrow cover for 11% of the storage budget.
+    libState = "error";
+    libMsg = "Couldn't load the library (" + ex.message + "). It has to be served next to index.html; it won't load from a local file preview.";
   }
   render();
 }
@@ -1608,16 +1888,40 @@ function pruneSeedCopies(){
   render();
 }
 
+function mealTemplateCard(){
+  const tpls = D.mealTemplates || [];
+  if(!tpls.length) return `<div class="card">
+    <div class="lift"><h3>Meal templates</h3><span class="last">none yet</span></div>
+    <p class="sub" style="margin-top:6px">A meal you eat often, saved whole. Log one on the Day tab, then use “Save these N as a template” under it — after that it is one tap from the ＋ on any meal.</p>
+  </div>`;
+  let h = `<div class="card">
+    <div class="lift"><h3>Meal templates</h3><span class="last">${tpls.length}</span></div>
+    <p class="sub" style="margin:6px 0 10px">Add one from the ＋ on any meal. Items follow later edits to the underlying food.</p>`;
+  tpls.forEach(t => {
+    const cal = t.items.reduce((a,it) => {
+      const f = foodById(it.foodId);
+      const per = f ? perBase(f) : it.per;
+      return a + entryBase({ qty:it.qty, unit:it.unit }) * (Array.isArray(per) ? per[0] : (per&&per.cal)||0);
+    }, 0);
+    h += `<div class="list-row">
+      <span style="font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}
+        <span class="sub">· ${t.items.length} item${t.items.length===1?"":"s"} · ${round(cal)} cal</span></span>
+      <button class="icon" onclick="delMealTemplate('${t.id}')">🗑</button>
+    </div>`;
+  });
+  return h + `</div>`;
+}
+
 function libraryCard(){
   const mineCount = (NUT().foods||[]).length;
   const seeds = (NUT().foods||[]).filter(f=>f.src==="seed").length;
   const hid = (NUT().hidden||[]).length;
   const status = libState==="loading" ? "loading…"
-               : libState==="ready" ? `${LIB.length} foods${libFrom==="cache" ? " · offline copy" : ""}`
+               : libState==="ready" ? `${LIB.length} foods`
                : "not loaded";
   let h = `<div class="card">
     <div class="lift"><h3>Food library</h3><span class="last">${status}</span></div>
-    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. Editing one saves your version; deleting one hides it. Row-by-row sourcing sits in <span class="mono">starter-foods-provenance.json</span>, which the app never loads.</p>
+    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. It is fetched fresh each time the app opens, which needs a connection. Editing one saves your version; deleting one hides it. Row-by-row sourcing sits in <span class="mono">starter-foods-provenance.json</span>, which the app never loads.</p>
     <div class="sub" style="margin-bottom:10px">Your own foods: ${mineCount}${seeds ? ` · ${seeds} saved copies from the old import` : ""}${hid ? ` · ${hid} hidden` : ""}</div>
     <button class="ghost" ${libState==="loading"?"disabled":""} onclick="loadLibrary(true)">${libState==="loading"?"Loading…":"Reload library"}</button>`;
   if(seeds) h += `<button class="ghost" style="margin-top:8px" onclick="pruneSeedCopies()">Drop saved copies the library already provides</button>`;
@@ -1631,18 +1935,23 @@ function dietFoods(){
   let h = `<p class="sub" style="margin-bottom:12px">Your foods and the shipped library, searched together. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids, or ct for whole items like an egg or a bar — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
 
   h += aiScanCard();
+  h += mealTemplateCard();
   h += libraryCard();
 
   // add-food card (prefilled after a scan)
   const sr = scanResult || {};
   h += `<div class="foodcard" ${scanResult?'style="border-color:var(--accent)"':''}>
-    ${scanResult?'<div class="sub" style="margin-bottom:8px;color:var(--accent)">From your photo — an estimate. Review, then Add food.</div>':''}
+    ${scanResult ? `<div class="sub" style="margin-bottom:8px;color:var(--accent)">${
+      sr.mode === "label" ? "Transcribed from the label" :
+      sr.mode === "recipe" ? "One serving" + (sr.servings ? " of " + sr.servings : "") + (sr.amount ? ", about " + sr.amount + " " + (sr.unit||"g") : "") :
+      "From your photo — an estimate"}. Review, then Add food.${
+      sr.basis ? "<br><span style=\"color:var(--dim)\">" + esc(sr.basis) + "</span>" : ""}</div>` : ""}
     <input type="text" id="nfName" placeholder="New food name" value="${esc(sr.name||"")}">
     <div class="qty" style="margin-top:8px">
       <span class="sub">per</span>
-      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="${sr.grams!=null?esc(sr.grams):"100"}">
+      <input class="num" style="width:70px" type="number" inputmode="decimal" id="nfAmount" value="${sr.amount!=null?esc(sr.amount):"100"}">
       <select id="nfUnit" onchange="onNewFoodUnit(this.value)">
-        <option value="g">g</option><option value="ml">ml</option><option value="ct">ct</option>
+        ${["g","ml","ct"].map(u=>`<option value="${u}" ${(sr.unit||"g")===u?"selected":""}>${u}</option>`).join("")}
       </select>
     </div>
     <div class="macros">
@@ -1738,6 +2047,52 @@ function toggleDietCal(){ dietCalOpen=!dietCalOpen; if(dietCalOpen) calMonth=pd(
 function setRemaining(v){ dietRemaining=v; render(); }
 function startAdd(meal){ addingMeal=meal; foodFilter=""; render(); }
 function toggleMeal(meal){ mealCollapsed[meal] = !mealCollapsed[meal]; render(); }
+/* ---- meal templates ----------------------------------------------------
+   A named set of foods and quantities. Items store the food id so the template
+   follows later edits to that food, plus a snapshot of the rates in case the food
+   is gone by the time the template is used.                                    */
+function saveMealTemplate(meal){
+  const entries = dayEntries(dietDate).filter(e => e.meal === meal);
+  if(!entries.length) return;
+  const name = (prompt("Name this meal", meal) || "").trim();
+  if(!name) return;
+  D.mealTemplates.push({
+    id: "mt" + Date.now(), name,
+    items: entries.map(e => ({ foodId:e.foodId, name:e.name, qty:e.qty, unit:e.unit, per:e.per }))
+  });
+  save(); render();
+}
+
+function applyMealTemplate(id, meal){
+  const t = (D.mealTemplates||[]).find(x => x.id === id);
+  if(!t) return;
+  if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
+  const stamp = Date.now();
+  t.items.forEach((it, k) => {
+    const f = foodById(it.foodId);
+    // if the food has since changed between mass, volume and count, the saved unit
+    // no longer applies — fall back to the food's own reference portion
+    let unit = it.unit, qty = it.qty, per = it.per;
+    if(f){
+      per = perBase(f);
+      if(baseOf(unit) !== baseOf(f.refUnit || "g")){ unit = f.refUnit || "g"; qty = f.amount || 100; }
+    }
+    NUT().log[dietDate].push({
+      id: "e" + stamp + "_" + k, foodId: it.foodId, name: f ? f.name : it.name,
+      meal, qty, unit, per
+    });
+  });
+  addingMeal = null; mealCollapsed[meal] = false;
+  invalidateLogStats(); save(); render();
+}
+
+function delMealTemplate(id){
+  const t = (D.mealTemplates||[]).find(x => x.id === id);
+  if(!t || !confirm(`Delete the template “${t.name}”? Meals already logged from it stay put.`)) return;
+  D.mealTemplates = D.mealTemplates.filter(x => x.id !== id);
+  save(); render();
+}
+
 function copyYesterdayMeal(meal){
   const y = iso(new Date(pd(dietDate).getTime() - 864e5));
   const src = dayEntries(y).filter(e=>e.meal===meal);
@@ -1759,7 +2114,8 @@ function setFoodSearch(v){ foodSearch=v; render(); }
 function loadAiSettings(){
   try{
     aiKey = localStorage.getItem(AI_KEY_LS) || "";
-    localStorage.removeItem(AI_MODEL_LS);      // the model is no longer a setting
+    localStorage.removeItem(AI_MODEL_LS);        // the model is no longer a setting
+    localStorage.removeItem(LIB_STALE_KEY);      // and neither is the offline library copy
   }catch(e){}
 }
 function saveAiKey(){
@@ -1774,6 +2130,11 @@ function clearAiKey(){
 }
 function toggleAiSettings(){ aiSettingsOpen = !aiSettingsOpen; render(); }
 function setScanDesc(v){ scanDesc = v; }
+function setScanMode(m){
+  if(scanMode === m) return;
+  scanMode = m; scanMsg = ""; render();
+}
+function dropScanImg(i){ scanImgs.splice(i,1); render(); }
 
 function imgToBase64(file, maxDim){
   return new Promise((res,rej)=>{
@@ -1801,20 +2162,62 @@ async function onScanFile(e){
   e.target.value = "";
   if(!file) return;
   scanBusy = true; scanMsg = "Reading photo…"; render();
-  try{ scanImg = await imgToBase64(file, 1024); scanMsg = ""; }
+  // recipes and labels are text, so they need the detail; a plated meal does not
+  try{
+    const img = await imgToBase64(file, scanMode === "meal" ? 1024 : 1568);
+    if(scanImgs.length >= SCAN_MAX_IMGS) scanImgs.shift();
+    scanImgs.push(img);
+    scanMsg = "";
+  }
   catch(ex){ scanMsg = ex.message || "Couldn't read that photo."; }
   scanBusy = false; render();
 }
 
-const SCAN_SYSTEM =
-`You estimate nutrition from a meal photo plus a short user description.
-Respond with ONLY a JSON object — no prose, no markdown fences — in exactly this shape:
-{"name": string, "grams": number, "calories": number, "protein_g": number, "carb_g": number, "fiber_g": number, "fat_g": number, "note": string}
-"grams" is your best estimate of the total edible weight shown. The macro numbers are totals for that whole portion. "fiber_g" is the dietary fiber contained within "carb_g", not in addition to it. Keep "note" under 12 words. If unsure, still give your best single estimate.`;
+const SCAN_MAX_IMGS = 3;
+const SCAN_MODES = [
+  ["meal",   "Meal photo", "a plated meal"],
+  ["recipe", "Recipe",     "a recipe, screenshot or pasted"],
+  ["label",  "Label",      "a Nutrition Facts panel"]
+];
 
-// The role and the output contract are identical on every call, so they belong in
-// `system`. Only the photo and the typed description vary, so only those are messages.
-async function callVision(img, desc){
+/* The three modes are different jobs, not different phrasings of one job: a meal
+   photo needs portion estimation, a recipe needs arithmetic and a serving divisor,
+   a label needs transcription and no estimation at all. They share one output
+   contract so the add-food form can be filled the same way from any of them.   */
+const SCAN_CONTRACT =
+`Think it through first if the task needs it, then end your reply with a JSON object as the very last thing — no fences, no text after it — in exactly this shape:
+{"name": string, "amount": number, "unit": "g" | "ml", "calories": number, "protein_g": number, "carb_g": number, "fiber_g": number, "fat_g": number, "servings": number or null, "saw": "meal" | "recipe" | "label" | "unclear", "basis": string, "note": string}
+"unit" is always a weight or a volume, never a count: use "ml" for drinks and other things measured by volume, "g" for everything else. If the thing is naturally counted — a bar, a cookie, two tacos — give the weight of it in grams anyway, and say what that count was in "note".
+The macro numbers are the totals for ONE "amount" of "unit" — never per 100 g unless amount is 100, and never for a whole recipe or package unless that is the one thing being logged. "fiber_g" is the dietary fiber contained within "carb_g", not in addition to it. "saw" is what the image or text actually turned out to be, which may not be what you were asked for. "basis" is the short working you used, under 25 words. "note" is anything the user should check, under 20 words. If unsure, still commit to one best estimate.`;
+
+const SCAN_SYSTEM = {
+  meal:
+`You estimate nutrition from a photo of a meal, plus whatever description the user typed.
+Judge the portion from the plate, bowl or container, and from any utensil or hand for scale. Set "unit" to "g" and "amount" to the total edible weight you estimate — bones, shells, rinds and packaging excluded. Set "servings" to null.
+` + SCAN_CONTRACT,
+
+  recipe:
+`You read a recipe — a screenshot, a photo of a page, or text the user pasted — and work out the nutrition of ONE SERVING.
+Method: list the ingredients with their stated quantities, convert every volume to a weight using standard densities, total the macros and the cooked weight, then divide both by the number of servings the recipe states. If it states no serving count, choose a sensible one and say which in "note". Put the servings figure in "servings".
+Count only what is eaten: subtract marinade that is discarded, oil left in the pan, and water that boils off. Do not subtract water for anything absorbed, such as rice or pasta.
+The user may describe changes they made — a substitution, a different quantity, an extra ingredient, a different yield, or a step skipped. Apply them. Where the user's text and the recipe disagree, the user is right, and "basis" must say what you changed.
+If the user says how much of it they ate, do not fold that into the numbers: keep the entry defined as one serving and put their portion in "note" so they can enter it when logging.
+Set "amount" to the weight of one serving and "unit" to "g", or to "ml" if the dish is a drink. Name the dish as the recipe names it.
+` + SCAN_CONTRACT,
+
+  label:
+`You transcribe a Nutrition Facts panel from a photo. This is transcription, not estimation: copy the printed numbers and do not adjust them.
+Set "amount" and "unit" to the serving size exactly as declared in grams or millilitres — US panels almost always print this in parentheses after the household measure. If the panel gives only a household measure such as "1 bar" or "2 cookies", estimate its weight in grams, and say in "note" both the household measure and that its weight is your estimate. Set "servings" to the servings per container.
+If the panel is cut off or unreadable in part, say which numbers you had to infer in "note".
+` + SCAN_CONTRACT
+};
+
+// The role and the output contract are fixed per mode, so they belong in `system`.
+// Only the images and the typed text vary, so only those are messages.
+async function callVision(imgs, desc, mode){
+  const content = imgs.map(im => ({ type:"image", source:{ type:"base64", media_type: im.mediaType, data: im.data } }));
+  content.push({ type:"text", text: (mode === "recipe" ? "Recipe text or notes from the user: " : "User description: ")
+                                    + (desc.trim() || "(none provided)") });
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1825,12 +2228,9 @@ async function callVision(img, desc){
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      max_tokens: 400,
-      system: SCAN_SYSTEM,
-      messages: [{ role:"user", content: [
-        { type:"image", source:{ type:"base64", media_type: img.mediaType, data: img.data } },
-        { type:"text", text: "User description: " + (desc || "(none provided)") }
-      ]}]
+      max_tokens: mode === "meal" ? 500 : 1200,   // adding up a recipe needs room to work
+      system: SCAN_SYSTEM[mode] || SCAN_SYSTEM.meal,
+      messages: [{ role:"user", content }]
     })
   });
   if(!res.ok){
@@ -1840,28 +2240,59 @@ async function callVision(img, desc){
   }
   const data = await res.json();
   const text = (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("").trim();
-  const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+  const parsed = lastJson(text);
+  const unit = parsed.unit === "ml" ? "ml" : "g";     // weight or volume, never a count
   return {
-    name: String(parsed.name || "Scanned meal"),
-    grams: Math.max(1, Math.round(Number(parsed.grams) || 100)),
+    name: String(parsed.name || "Scanned item"),
+    unit,
+    amount: Math.max(1, Math.round(Number(parsed.amount) || 100)),
     cal: Math.round(Number(parsed.calories) || 0),
     protein: Math.round(Number(parsed.protein_g) || 0),
     carb: Math.round(Number(parsed.carb_g) || 0),
     fiber: Math.round(Number(parsed.fiber_g) || 0),
     fat: Math.round(Number(parsed.fat_g) || 0),
-    note: String(parsed.note || "")
+    servings: Number(parsed.servings) > 0 ? Number(parsed.servings) : null,
+    saw: String(parsed.saw || ""),
+    basis: String(parsed.basis || ""),
+    note: String(parsed.note || ""),
+    mode
   };
+}
+
+// The model is allowed to reason before answering, so the object we want is the last
+// one in the reply. Walk the opening braces backwards until one of them parses.
+function lastJson(text){
+  const t = text.replace(/```json|```/g, "");
+  for(let i = t.lastIndexOf("{"); i >= 0; i = t.lastIndexOf("{", i - 1)){
+    const tail = t.slice(i);
+    try{ return JSON.parse(tail.trim()); }catch(e){}
+    const end = tail.lastIndexOf("}");
+    if(end > 0){ try{ return JSON.parse(tail.slice(0, end + 1)); }catch(e){} }
+    if(i === 0) break;
+  }
+  throw new Error("the reply contained no JSON object");
 }
 
 async function runScan(){
   if(!aiKey){ scanMsg = "Enter your API key first (⚙)."; render(); return; }
-  if(!scanImg){ scanMsg = "Add a photo first."; render(); return; }
-  scanBusy = true; scanMsg = "Analyzing with " + AI_LABEL + "…"; render();
+  if(!scanImgs.length && !(scanMode === "recipe" && scanDesc.trim())){
+    scanMsg = scanMode === "recipe" ? "Add a photo or paste the recipe first." : "Add a photo first.";
+    render(); return;
+  }
+  scanBusy = true;
+  scanMsg = (scanMode === "recipe" ? "Working through the recipe with " : "Analyzing with ") + AI_LABEL + "…";
+  render();
   try{
-    const r = await callVision(scanImg, scanDesc);
+    const mode = scanMode;
+    const r = await callVision(scanImgs, scanDesc, mode);
     scanResult = r;
-    scanImg = null; scanDesc = ""; scanBusy = false;
-    scanMsg = r.note ? ("Estimate ready — " + r.note) : "Estimate ready — review and Add food below.";
+    scanImgs = []; scanDesc = ""; scanBusy = false;
+    const bits = [];
+    if(r.saw && r.saw !== "unclear" && r.saw !== mode)
+      bits.push("that looked like " + r.saw + ", not " + mode + " — check the numbers");
+    if(r.servings) bits.push("recipe makes " + r.servings + (mode === "label" ? " per container" : " servings"));
+    if(r.note) bits.push(r.note);
+    scanMsg = bits.length ? ("Ready — " + bits.join(" · ")) : "Ready — review and Add food below.";
     render();
   }catch(ex){
     scanBusy = false;
@@ -1894,6 +2325,7 @@ Diet phases:
 - Rate of gain during a surplus depends on training age. First year of training: about 2% of bodyweight per month on a 300–500 kcal surplus. Intermediate: about 1% per month. Advanced, meaning five or more years of consistent training: about 0.5% per month.
 - Macros have exactly two hard floors: fat at least 0.3 g per lb of bodyweight, and protein between 0.7 and 1 g per lb. Everything left over is carbs versus fat by preference — do not present a particular split as though it were required.
 - When they change phase, tell them to expect a water weight shift. Moving from a deficit to maintenance typically adds a couple to a few pounds within the first week; their true maintenance weight is what the scale settles at after that spike, not the number on the last day of the deficit.
+- Drive calorie changes off the gap between observed and target rate of change, not off a computed maintenance figure: a rate error is measured, whereas maintenance carries an assumed energy density. When the rate is outside the band, move intake by roughly 150 kcal and re-measure rather than recalculating from scratch. Use the measured maintenance figure above as a cross-check, and only when its interval is tight.
 - While in a deficit or a surplus, adjust calories against observed rate of change and activity, and name the confound when you see one. If weight is dropping faster than target and step count has climbed at the same time, say so and offer both levers: fewer steps, or more calories.
 
 Training:
@@ -1976,6 +2408,27 @@ function buildCoachContext(hist){
     const show = asc.length > 40 ? asc.slice(-40) : asc;
     L.push(`${asc.length>40?"Last 40 ":"All "}weigh-ins: ${show.map(w=>w.date+":"+w.value).join(", ")}`);
   } else L.push("None logged.");
+
+  L.push("\n=== CURRENT PHASE ===");
+  if(D.phase){
+    const ph = D.phase, def = PHASES[ph.type], pr = phaseProgress(ph);
+    L.push(`${def.label}, started ${ph.start} at ${ph.startWeight} lb — week ${Math.floor(pr.weeks)+1} of an intended ${def.weeks[0]}-${def.weeks[1]}.`);
+    L.push(`Target band ${pr.loLb.toFixed(2)}-${pr.hiLb.toFixed(2)} lb/week${ph.level?` (${GAIN_LEVELS[ph.level].label})`:""}. Observed ${pr.perWeek!=null?pr.perWeek.toFixed(2)+" lb/week":"not enough weigh-ins"}${pr.changed!=null?`, ${pr.changed>0?"+":""}${pr.changed.toFixed(1)} lb overall (${pr.pctChanged.toFixed(1)}% of start)`:""}.`);
+    const warn = phaseWarnings(ph, pr);
+    if(warn.length) L.push("Flags: " + warn.join(" "));
+  } else L.push("No phase running. If the data suggest one, say which and why.");
+  if(D.phases.length)
+    L.push("Previous phases: " + D.phases.map(x=>`${(PHASES[x.type]||{label:x.type}).label} ${x.start}→${x.end}${x.endWeight!=null?` (${x.startWeight}→${x.endWeight} lb)`:""}`).join("; "));
+
+  L.push("\n=== MEASURED MAINTENANCE ===");
+  const td = tdeeEstimate();
+  if(td){
+    L.push(`${Math.round(td.tdee)} cal/day +/- ${Math.round(td.se)}, from ${td.days} days: mean intake ${Math.round(td.intake)} cal/day over ${td.loggedDays} logged days, weight trend ${td.perWeek.toFixed(2)} lb/week across ${td.weighIns} weigh-ins, at ${td.k} cal/lb.`);
+    L.push(td.confident
+      ? "The interval is tight enough to base calorie targets on. Prefer it over any formula estimate."
+      : "The interval is too wide to act on. Treat it as a hint, base recommendations on observed rate of change instead, and say the estimate needs more data.");
+    L.push("This inverts logged intake, so a consistent under-report shifts it by the same amount it shifts the log; a deficit set against it still lands about right. It breaks only if the logging habit itself changes.");
+  } else L.push("Not enough overlapping weight and food data to measure it yet.");
 
   const t = NUT().targets;
   L.push("\n=== NUTRITION TARGETS ===");
@@ -2221,7 +2674,7 @@ function addFood(){
     cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fiber:num("nfFb"), fat:num("nfF")
   });
   sortFoods(); invalidateFoods();
-  scanResult = null; scanMsg = "";
+  scanResult = null; scanMsg = ""; scanImgs = []; scanDesc = "";
   save(); render();
 }
 function editFood(id,f,v){
