@@ -243,6 +243,7 @@ const AI_LABEL = "Sonnet 5";
 const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const BUILD = "stage3";   // shown on the Backup tab so you can see which build is live
 const SCHEMA = 13;  // bump whenever the saved data shape changes, and add a migration below
 const SCRATCH_KEY = "gymlog.scratch.v1";   // the hot path: rewritten while you type a set, kept out of the main blob
 const LIB_STALE_KEY = "gymlog.lib.v1";     // retired in v13; removed on load to reclaim the space
@@ -1423,7 +1424,7 @@ function cloudBackupCard(){
   const mins = when ? Math.floor((Date.now() - syncState.at)/60000) : null;
   const rel  = mins === null ? "" : mins < 1 ? "just now" : mins < 60 ? `${mins} min ago`
              : mins < 1440 ? `${Math.floor(mins/60)} h ago` : `${Math.floor(mins/1440)} d ago`;
-  let h = `<div style="height:20px"></div><div class="eyebrow">Automatic</div><h2>Cloud backup</h2><div style="height:12px"></div>`;
+  let h = `<div style="height:20px"></div><div class="eyebrow">Automatic · build ${BUILD}</div><h2>Cloud backup</h2><div style="height:12px"></div>`;
 
   if(!syncCode){
     h += `<div class="card" style="font-size:13px;color:var(--dim);line-height:1.5">
@@ -3278,6 +3279,7 @@ load();
 // a stale cached build navigates away here rather than starting up
 if(!selfHealStaleBuild()){
   loadAiSettings();
+  loadSyncSettings();             // before the first paint: the access code decides what the AI card shows
   ensureSelection();
   seedDraft();
   render();
@@ -3292,7 +3294,6 @@ if(!selfHealStaleBuild()){
      iOS gives a backgrounded web app almost no time to finish a request, and a body
      this size will not survive that window. Backgrounding still triggers an attempt,
      but nothing depends on it landing. */
-  loadSyncSettings();
   setTimeout(()=>cloudBackup(true), 4000);              // once, shortly after launch
   setInterval(()=>cloudBackup(false), SYNC_EVERY);
   document.addEventListener("visibilitychange", ()=>{
