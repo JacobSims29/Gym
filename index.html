@@ -1339,7 +1339,7 @@ function tdeeCard(){
     <div class="lift"><h3>Maintenance calories</h3><span class="last">±${Math.round(e.se)}</span></div>
     <h2 class="mono" style="margin:6px 0 0">${commas(Math.round(e.tdee/10)*10)} <span class="sub" style="font-size:13px">cal/day</span></h2>
     ${body}
-    <p class="sub" style="margin-top:8px;color:var(--dimmer)">Assumes ${e.k}. Your logging bias mostly cancels: if you under-record intake, this reads low by the same amount, so a deficit set against it still comes out about right.</p>
+    <p class="sub" style="margin-top:8px;color:var(--dimmer)">Assumes ${e.k} cal per lb of tissue moved. Your logging bias mostly cancels: if you under-record intake, this reads low by the same amount, so a deficit set against it still comes out about right.</p>
   </div>`;
   return `<div class="card">
     <div class="lift"><h3>Maintenance calories</h3><span class="last">too noisy</span></div>
