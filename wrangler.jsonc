@@ -1,5 +1,9 @@
 {
   "name": "gymlog",
+  "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
-  "assets": { "directory": "." }
+  "assets": { "directory": "." },
+  "kv_namespaces": [
+    { "binding": "BACKUPS", "id": "a9f54c5d69f148b4ad674d7d5db68812" }
+  ]
 }

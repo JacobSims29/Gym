@@ -223,6 +223,20 @@ const KEY = "gymlog.v1";
 let idSeq = 0;
 const uid = prefix => prefix + Date.now().toString(36) + (idSeq++).toString(36);
 const AI_KEY_LS = "gymlog.ai.key";      // stored separately so it never lands in a backup
+/* ---- cloud backup ----
+   The access code names which backup in the cloud is yours. Like the AI key it lives
+   in its own localStorage key and never lands in an export: an export is a file you
+   might hand to someone, and this is a credential. Write it down somewhere outside
+   the app — if the phone is what you lost, a code stored only on the phone is no use. */
+const SYNC_CODE_LS  = "gymlog.sync.code";
+const SYNC_STATE_LS = "gymlog.sync.state";
+const SYNC_URL      = "/api/backup";    // same origin: the Worker serving this file also answers here
+const SYNC_EVERY    = 3 * 60 * 1000;    // ms between automatic attempts while the app is open
+let syncCode = "";
+let syncState = { at:null, ok:null, msg:"" };
+let syncDirty = false;                  // set by save(), cleared by a successful upload
+let syncBusy = false;
+let syncList = null;                    // dates fetched for the restore picker, null until asked
 const AI_MODEL = "claude-sonnet-5";     // one model, no picker: the cheaper one guessed portions badly
 const AI_LABEL = "Sonnet 5";
 let aiKey = "";
@@ -433,7 +447,7 @@ let scratchTimer = null;
 
 function save(){
   if(blocked) return;                       // never write over data we failed to read
-  try{ D.schema = SCHEMA; localStorage.setItem(KEY, JSON.stringify(D)); err=""; }
+  try{ D.schema = SCHEMA; localStorage.setItem(KEY, JSON.stringify(D)); err=""; syncDirty = true; }
   catch(e){ err="Storage is full — export a backup to be safe."; }
 }
 // the unsaved-entry store, ~1 KB, written on its own instead of dragging all of D along
@@ -1404,6 +1418,57 @@ function storageCard(){
   </div>`;
 }
 
+function cloudBackupCard(){
+  const when = syncState.at ? new Date(syncState.at) : null;
+  const mins = when ? Math.floor((Date.now() - syncState.at)/60000) : null;
+  const rel  = mins === null ? "" : mins < 1 ? "just now" : mins < 60 ? `${mins} min ago`
+             : mins < 1440 ? `${Math.floor(mins/60)} h ago` : `${Math.floor(mins/1440)} d ago`;
+  let h = `<div style="height:20px"></div><div class="eyebrow">Automatic</div><h2>Cloud backup</h2><div style="height:12px"></div>`;
+
+  if(!syncCode){
+    h += `<div class="card" style="font-size:13px;color:var(--dim);line-height:1.5">
+      Off. Set an access code and the app will send a copy of everything to your own
+      Cloudflare account every few minutes, keeping the last 14 days.
+      <b>Write the code down somewhere outside this app</b> — it is the only thing that
+      identifies which backup is yours.
+    </div>`;
+  } else if(blocked){
+    h += `<div class="warn" style="font-size:13px">Paused. The app could not read its saved data, so it will not
+      send anything to the cloud — the copy up there is the good one and must not be written over.</div>`;
+  } else {
+    const cls = syncState.ok === false ? "warn" : "card";
+    h += `<div class="${cls}" style="font-size:13px;line-height:1.5;color:${syncState.ok===false?"":"var(--dim)"}">
+      ${syncState.at === null ? "On. Nothing sent yet."
+        : syncState.ok ? `Last sent ${rel} · ${esc(syncState.msg)}${syncDirty ? " · changes waiting" : ""}`
+                       : `Last attempt ${rel} failed: ${esc(syncState.msg)}`}
+    </div>
+    <button class="ghost" onclick="cloudBackup(true)" ${syncBusy?"disabled":""} style="margin-bottom:8px">${syncBusy?"Working…":"⬆ Send a copy now"}</button>
+    <button class="ghost" onclick="cloudRefreshList()" ${syncBusy?"disabled":""} style="margin-bottom:12px">☁ Show cloud backups</button>`;
+
+    if(syncList && syncList.length){
+      h += `<div class="card" style="padding:0">`;
+      h += syncList.map(b => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)">
+          <div><div style="font-size:14px">${esc(shortD(b.date))}</div>
+          <div class="sub">${b.bytes ? Math.round(b.bytes/1024)+" KB" : ""}</div></div>
+          <button class="ghost" style="margin:0;width:auto;padding:6px 10px;font-size:12px" onclick="cloudRestore('${esc(b.date)}')">Restore</button>
+        </div>`).join("");
+      h += `</div>`;
+    }
+  }
+
+  h += `<div style="height:8px"></div>
+    <label class="sub" style="display:block;margin-bottom:6px">Access code</label>
+    <input type="text" id="syncCodeInput" autocapitalize="off" autocorrect="off" spellcheck="false"
+      placeholder="12+ characters, letters and numbers" value="${esc(syncCode)}" style="margin-bottom:8px">
+    <button class="ghost" onclick="saveSyncCode()">${syncCode ? "Update code" : "Turn on cloud backup"}</button>
+    <p class="sub" style="margin-top:10px;line-height:1.5">
+      The code is stored on this device only and is never included in an export.
+      Anyone with the code can read and overwrite this backup, so use a long random one
+      and keep it in a password manager. Each person using the app needs their own.
+    </p>`;
+  return h;
+}
+
 function viewBackup(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   return `
@@ -1418,6 +1483,7 @@ function viewBackup(){
   <button class="primary" onclick="exportAll()" style="margin-bottom:12px">⬇ Export everything</button>
   <input type="file" accept="application/json" id="impFile" class="hide" onchange="importAll(event)">
   <button class="ghost" onclick="document.getElementById('impFile').click()">⬆ Restore from a backup file</button>
+  ${cloudBackupCard()}
   ${note ? `<p class="ok">${esc(note)}</p>` : ""}
   <p class="sub" style="margin-top:16px;line-height:1.5">
     Export writes one JSON file holding every template, session, weigh-in, food, and diet day.
@@ -3030,29 +3096,120 @@ async function exportAll(){
   }catch(e){ err = "Export failed. Try again."; }
   render();
 }
+/* One restore path, used by both the file picker and the cloud list, so a cloud
+   restore gets the same version check and the same migration as a file does.
+   Throws before anything is written; a NewerBackup is reported, not applied. */
+function NewerBackup(v){ this.v = v; }
+function applyBackupObject(parsed){
+  if(!parsed || !parsed.data) throw new Error("bad file");
+  const v = Number(parsed.version) || Number(parsed.data.schema) || 1;
+  if(v > SCHEMA) throw new NewerBackup(v);
+  const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
+  D = upgraded;
+  blocked = null;                     // a good file supersedes whatever we couldn't read
+  save(); saveScratch(); invalidateFoods(); invalidateLogStats(); ensureSelection(); seedDraft();
+  return v;
+}
+const newerMsg = v => `That backup was written by a newer version of the app (v${v}). Update the app first — the backup is fine, and nothing has been changed.`;
+const restoredMsg = v => v < SCHEMA ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.` : "Restored from backup.";
+
 async function importAll(e){
   const file = e.target.files[0];
   if(!file) return;
   note = "";
   try{
-    const parsed = JSON.parse(await file.text());
-    if(!parsed || !parsed.data) throw new Error("bad file");
-
-    const v = Number(parsed.version) || Number(parsed.data.schema) || 1;
-    if(v > SCHEMA){
-      err = `That backup was written by a newer version of the app (v${v}). Update the app first — the file is fine, and nothing has been changed.`;
-      e.target.value = ""; render(); return;
-    }
-
-    const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
-    D = upgraded;
-    blocked = null;                     // a good file supersedes whatever we couldn't read
-    save(); saveScratch(); invalidateFoods(); invalidateLogStats(); ensureSelection(); seedDraft();
-    note = v < SCHEMA
-      ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.`
-      : "Restored from backup.";
-  }catch(ex){ err = "That file isn't a gym backup, or it's damaged. Nothing was changed."; }
+    const v = applyBackupObject(JSON.parse(await file.text()));
+    note = restoredMsg(v);
+  }
+  catch(ex){
+    err = ex instanceof NewerBackup ? newerMsg(ex.v)
+                                    : "That file isn't a gym backup, or it's damaged. Nothing was changed.";
+  }
   e.target.value = "";
+  render();
+}
+
+/* ============ cloud backup ============
+   localStorage stays the source of truth. This is a copy pushed to a Worker that files
+   it under today's date, keeping a fortnight of daily copies. Nothing here ever reads
+   from the cloud on its own — restoring is always something you ask for.  */
+function loadSyncSettings(){
+  try{
+    syncCode = localStorage.getItem(SYNC_CODE_LS) || "";
+    const s = localStorage.getItem(SYNC_STATE_LS);
+    if(s) syncState = JSON.parse(s);
+  }catch(e){}
+}
+function saveSyncState(){ try{ localStorage.setItem(SYNC_STATE_LS, JSON.stringify(syncState)); }catch(e){} }
+function saveSyncCode(){
+  const raw = (document.getElementById("syncCodeInput").value || "").trim();
+  if(raw && !/^[A-Za-z0-9._-]{12,80}$/.test(raw)){
+    err = "The access code must be 12–80 characters, letters/numbers/dot/dash/underscore only.";
+    render(); return;
+  }
+  syncCode = raw;
+  try{ raw ? localStorage.setItem(SYNC_CODE_LS, raw) : localStorage.removeItem(SYNC_CODE_LS); }catch(e){}
+  syncList = null; err = ""; note = raw ? "Access code saved. Backing up now…" : "Cloud backup turned off.";
+  render();
+  if(raw) cloudBackup(true);
+}
+
+async function cloudBackup(manual){
+  // Rule 1: if the saved data could not be read, this copy of D is not the real one.
+  // Uploading it would put a wrong copy on top of a right one.
+  if(blocked || !syncCode || syncBusy) return;
+  if(!manual && !syncDirty) return;
+  if(!manual && syncState.at && Date.now() - syncState.at < SYNC_EVERY) return;
+  syncBusy = true;
+  const payload = JSON.stringify({app:"gymlog",version:SCHEMA,exported:today(),data:D});
+  try{
+    const res = await fetch(SYNC_URL, {
+      method: "POST",
+      headers: { "content-type":"application/json", "x-gym-code": syncCode },
+      body: payload
+    });
+    const out = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(out.error || ("HTTP " + res.status));
+    syncDirty = false;
+    syncList = null;                                     // the date list just changed
+    syncState = { at: Date.now(), ok: true, msg: `${Math.round(payload.length/1024)} KB` };
+  }catch(e){
+    syncState = { at: Date.now(), ok: false, msg: String((e && e.message) || e) };
+  }
+  syncBusy = false;
+  saveSyncState();
+  if(manual) render();
+}
+
+async function cloudRefreshList(){
+  if(!syncCode || syncBusy) return;
+  syncBusy = true; err = ""; note = "";
+  try{
+    const res = await fetch(SYNC_URL, { headers:{ "x-gym-code": syncCode } });
+    const out = await res.json();
+    if(!res.ok) throw new Error(out.error || ("HTTP " + res.status));
+    syncList = out.backups || [];
+    if(!syncList.length) note = "No cloud backups yet under that access code.";
+  }catch(e){ err = "Couldn't reach the cloud backup: " + ((e && e.message) || e); }
+  syncBusy = false;
+  render();
+}
+
+async function cloudRestore(date){
+  if(!syncCode || syncBusy) return;
+  if(!confirm(`Replace everything in the app with the ${date} cloud backup?\n\nWhat is in the app now will be gone.`)) return;
+  syncBusy = true; err = ""; note = "";
+  try{
+    const res = await fetch(SYNC_URL + "?date=" + encodeURIComponent(date), { headers:{ "x-gym-code": syncCode } });
+    const out = await res.json();
+    if(!res.ok) throw new Error(out.error || ("HTTP " + res.status));
+    const v = applyBackupObject(out);
+    note = restoredMsg(v) + ` (cloud copy from ${date})`;
+  }catch(e){
+    err = e instanceof NewerBackup ? newerMsg(e.v)
+                                   : "Restore failed: " + ((e && e.message) || e) + ". Nothing was changed.";
+  }
+  syncBusy = false;
   render();
 }
 
@@ -3137,6 +3294,18 @@ if(!selfHealStaleBuild()){
   // any debounced write the moment the app stops being visible
   addEventListener("pagehide", flushPending);
   document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden") flushPending(); });
+
+  /* Cloud backup runs on a timer while the app is open rather than on the way out:
+     iOS gives a backgrounded web app almost no time to finish a request, and a body
+     this size will not survive that window. Backgrounding still triggers an attempt,
+     but nothing depends on it landing. */
+  loadSyncSettings();
+  setTimeout(()=>cloudBackup(true), 4000);              // once, shortly after launch
+  setInterval(()=>cloudBackup(false), SYNC_EVERY);
+  document.addEventListener("visibilitychange", ()=>{
+    if(document.visibilityState === "hidden") cloudBackup(false);
+    else cloudBackup(false);
+  });
 }
 </script>
 </body>
