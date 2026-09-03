@@ -218,6 +218,10 @@
 <script>
 /* ============ constants ============ */
 const KEY = "gymlog.v1";
+// Date.now() alone collides when two records are created in the same millisecond —
+// two phases, two foods, two entries — so a counter is appended.
+let idSeq = 0;
+const uid = prefix => prefix + Date.now().toString(36) + (idSeq++).toString(36);
 const AI_KEY_LS = "gymlog.ai.key";      // stored separately so it never lands in a backup
 const AI_MODEL = "claude-sonnet-5";     // one model, no picker: the cheaper one guessed portions badly
 const AI_LABEL = "Sonnet 5";
@@ -932,6 +936,7 @@ function viewWeight(){
   </div>
   ${chartSVG()}
   ${phaseCard()}
+  ${phaseHistoryCard()}
   ${tdeeCard()}
   <div class="card">
     <div class="row" style="margin-bottom:12px">
@@ -981,6 +986,45 @@ function latestWeight(){
   return asc.length ? asc[asc.length-1] : null;
 }
 
+// the weigh-in closest to a date, within a tolerance — used to re-anchor a phase
+// when its start date moves
+function weightNear(ds, maxDays){
+  const t = pd(ds).getTime();
+  let best = null, bd = Infinity;
+  D.weights.forEach(w => {
+    const d = Math.abs(pd(w.date).getTime() - t)/864e5;
+    if(d <= maxDays && d < bd){ bd = d; best = w; }
+  });
+  return best;
+}
+
+function setPhaseStart(v){
+  if(!D.phase || !v) return;
+  if(v > today()){ err = "A phase can't start in the future."; render(); return; }
+  D.phase.start = v;
+  // the target band is a percentage of what you weighed at the start, so moving the
+  // date has to move the anchor too, or the band describes a weight you never were
+  const w = weightNear(v, 7);
+  if(w) D.phase.startWeight = +w.value;
+  err = ""; save(); render();
+}
+
+function setPhaseStartWeight(v){
+  const n = parseFloat(v);
+  if(!D.phase || !(n > 0)) return;
+  D.phase.startWeight = n;
+  save(); render();
+}
+
+function delArchivedPhase(id){
+  const ph = (D.phases||[]).find(x => x.id === id);
+  if(!ph) return;
+  const def = PHASES[ph.type] || { label: ph.type };
+  if(!confirm(`Delete the ${def.label.toLowerCase()} phase from ${ph.start} to ${ph.end}? Your weigh-ins and food log are untouched.`)) return;
+  D.phases = D.phases.filter(x => x.id !== id);
+  save(); render();
+}
+
 function startPhase(type, level){
   const def = PHASES[type];
   if(!def) return;
@@ -993,7 +1037,7 @@ function startPhase(type, level){
     const target = g.perMonth / WK_PER_MONTH;
     lo = target*0.6; hi = target*1.4;          // a band around the target, not a knife edge
   }
-  D.phase = { id:"ph"+Date.now(), type, level: type==="gain" ? (level||"intermediate") : null,
+  D.phase = { id:uid("ph"), type, level: type==="gain" ? (level||"intermediate") : null,
               start: today(), startWeight: +w.value, loPctWk: lo, hiPctWk: hi };
   save(); render();
 }
@@ -1045,6 +1089,25 @@ function phaseWarnings(ph, pr){
   return out;
 }
 
+function phaseHistoryCard(){
+  const hist = D.phases || [];
+  if(!hist.length) return "";
+  let h = `<div class="card">
+    <div class="lift"><h3>Phase history</h3><span class="last">${hist.length}</span></div>`;
+  [...hist].reverse().forEach(ph => {
+    const def = PHASES[ph.type] || { label: ph.type };
+    const wks = Math.max(0, Math.round((pd(ph.end).getTime() - pd(ph.start).getTime())/6048e5));
+    const ch = ph.endWeight != null ? ph.endWeight - ph.startWeight : null;
+    h += `<div class="list-row">
+      <span style="font-size:14px;min-width:0">${def.label}
+        <span class="sub">· ${shortD(ph.start)}–${shortD(ph.end)} · ${wks} wk${
+          ch != null ? ` · ${ch>0?"+":""}${ch.toFixed(1)} lb` : ""}</span></span>
+      <button class="icon" onclick="delArchivedPhase('${ph.id}')">🗑</button>
+    </div>`;
+  });
+  return h + `</div>`;
+}
+
 function phaseCard(){
   const ph = D.phase;
   if(!ph){
@@ -1059,12 +1122,6 @@ function phaseCard(){
         <button class="ghost grow" onclick="startPhase('maintain')">Maintenance</button>
         <button class="ghost grow" onclick="startPhase('rest')">Active rest</button>
       </div>`;
-    if(D.phases.length){
-      const last = D.phases[D.phases.length-1];
-      const d = PHASES[last.type];
-      h += `<p class="sub" style="margin-top:10px">Last: ${d?d.label:last.type}, ${last.start} to ${last.end}${
-        last.endWeight!=null ? `, ${last.startWeight} → ${last.endWeight} lb` : ""}.</p>`;
-    }
     return h + `</div>`;
   }
   const def = PHASES[ph.type], pr = phaseProgress(ph);
@@ -1072,9 +1129,15 @@ function phaseCard(){
   const arrow = def.dir < 0 ? "−" : def.dir > 0 ? "+" : "±";
   let h = `<div class="card">
     <div class="lift"><h3>${def.label}</h3><span class="last">week ${wk} of ${def.weeks[0]}–${def.weeks[1]}</span></div>
+    <div class="row" style="margin-top:10px">
+      <span class="sub" style="white-space:nowrap">started</span>
+      <input type="date" class="grow" value="${ph.start}" max="${today()}" onchange="setPhaseStart(this.value)">
+      <input class="num" style="width:80px" type="number" inputmode="decimal" step="0.1"
+             value="${ph.startWeight}" onchange="setPhaseStartWeight(this.value)">
+      <span class="sub">lb</span>
+    </div>
     <div class="sub" style="margin-top:8px;line-height:1.7">
-      Started ${shortD(ph.start)} at ${ph.startWeight} lb${ph.level ? ` · ${GAIN_LEVELS[ph.level].label.toLowerCase()}` : ""}<br>
-      Target ${arrow}${pr.loLb.toFixed(2)}–${pr.hiLb.toFixed(2)} lb/week${
+      ${ph.level ? GAIN_LEVELS[ph.level].label + "<br>" : ""}Target ${arrow}${pr.loLb.toFixed(2)}–${pr.hiLb.toFixed(2)} lb/week${
         ph.type==="gain" ? ` (${GAIN_LEVELS[ph.level].perMonth}% of bodyweight a month)` :
         ph.type==="cut" ? ` (${ph.loPctWk}–${ph.hiPctWk}% of bodyweight a week)` : ""}<br>
       ${pr.perWeek != null
@@ -2057,7 +2120,7 @@ function saveMealTemplate(meal){
   const name = (prompt("Name this meal", meal) || "").trim();
   if(!name) return;
   D.mealTemplates.push({
-    id: "mt" + Date.now(), name,
+    id: uid("mt"), name,
     items: entries.map(e => ({ foodId:e.foodId, name:e.name, qty:e.qty, unit:e.unit, per:e.per }))
   });
   save(); render();
@@ -2067,7 +2130,6 @@ function applyMealTemplate(id, meal){
   const t = (D.mealTemplates||[]).find(x => x.id === id);
   if(!t) return;
   if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
-  const stamp = Date.now();
   t.items.forEach((it, k) => {
     const f = foodById(it.foodId);
     // if the food has since changed between mass, volume and count, the saved unit
@@ -2078,7 +2140,7 @@ function applyMealTemplate(id, meal){
       if(baseOf(unit) !== baseOf(f.refUnit || "g")){ unit = f.refUnit || "g"; qty = f.amount || 100; }
     }
     NUT().log[dietDate].push({
-      id: "e" + stamp + "_" + k, foodId: it.foodId, name: f ? f.name : it.name,
+      id: uid("e"), foodId: it.foodId, name: f ? f.name : it.name,
       meal, qty, unit, per
     });
   });
@@ -2101,7 +2163,7 @@ function copyYesterdayMeal(meal){
   if(existing.length && !confirm(`Add yesterday's ${meal} (${src.length} items) on top of what's already here?`)) return;
   if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
   src.forEach((e,k)=>{
-    NUT().log[dietDate].push({ ...e, id:"e"+Date.now()+"_"+k });
+    NUT().log[dietDate].push({ ...e, id:uid("e") });
   });
   mealCollapsed[meal] = false;
   invalidateLogStats(); save(); render();
@@ -2638,7 +2700,7 @@ function addEntry(meal, foodId){
   const food = foodById(foodId);
   if(!food) return;
   const base = food.refUnit || "g";
-  const entry = { id:"e"+Date.now(), foodId, name:food.name, meal, qty:(food.amount||100), unit:base, per:perBase(food) };
+  const entry = { id:uid("e"), foodId, name:food.name, meal, qty:(food.amount||100), unit:base, per:perBase(food) };
   if(!NUT().log[dietDate]) NUT().log[dietDate] = [];
   NUT().log[dietDate].push(entry);
   invalidateLogStats(); save(); render();
@@ -2668,7 +2730,7 @@ function addFood(){
   const num = id => parseFloat(document.getElementById(id).value) || 0;
   const unit = document.getElementById("nfUnit").value;
   NUT().foods.push({
-    id:"f"+Date.now(), name,
+    id:uid("f"), name,
     amount: num("nfAmount") || UNIT_DEFAULT_AMOUNT[unit] || 100,
     refUnit: unit,
     cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fiber:num("nfFb"), fat:num("nfF")
