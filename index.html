@@ -232,6 +232,8 @@ const MONTHS = ["January","February","March","April","May","June","July","August
 const SCHEMA = 13;  // bump whenever the saved data shape changes, and add a migration below
 const SCRATCH_KEY = "gymlog.scratch.v1";   // the hot path: rewritten while you type a set, kept out of the main blob
 const LIB_STALE_KEY = "gymlog.lib.v1";     // retired in v13; removed on load to reclaim the space
+const PRE_KEY = "gymlog.pre.v1";           // copy of the data as it stood before the last upgrade
+const PRE_MAX = 800000;                    // chars — don't take a snapshot bigger than this
 const SAVE_DEBOUNCE = 500;                 // ms — coalesce keystroke writes
 const DEFAULT_TARGETS = { calMin:2000, calMax:2200, pMin:150, pMax:200, cMin:180, cMax:280, fMin:50, fMax:80, fbMin:25, fbMax:40 };
 const EMPTY = {
@@ -246,6 +248,10 @@ const EMPTY = {
 
 let D = structuredClone(EMPTY);
 let tab = "train", err = "", note = "";
+// Set when saved data could not be read. While it is set, nothing is written: the
+// alternative is an empty D quietly overwriting real history the first time the user
+// taps anything.
+let blocked = null;
 
 /* ============ dates ============ */
 const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -426,12 +432,14 @@ function migrate(raw){
 let scratchTimer = null;
 
 function save(){
+  if(blocked) return;                       // never write over data we failed to read
   try{ D.schema = SCHEMA; localStorage.setItem(KEY, JSON.stringify(D)); err=""; }
   catch(e){ err="Storage is full — export a backup to be safe."; }
 }
 // the unsaved-entry store, ~1 KB, written on its own instead of dragging all of D along
 function saveScratch(){
   if(scratchTimer){ clearTimeout(scratchTimer); scratchTimer = null; }
+  if(blocked) return;
   try{ localStorage.setItem(SCRATCH_KEY, JSON.stringify(D.scratch||{})); }catch(e){}
 }
 function saveScratchSoon(){
@@ -441,10 +449,33 @@ function saveScratchSoon(){
 // iOS suspends a backgrounded web app without warning, so commit anything pending
 function flushPending(){ if(scratchTimer) saveScratch(); }
 
-function load(){
+// Migrations only run forwards, so the moment an upgrade lands the old build can no
+// longer read the data. Keeping the last pre-upgrade copy makes a rollback survivable
+// without anyone having remembered to export first.
+function snapshotBefore(raw, from){
+  if(raw.length > PRE_MAX) return;
   try{
-    const raw = localStorage.getItem(KEY);
-    if(raw) D = migrate(JSON.parse(raw));
+    localStorage.setItem(PRE_KEY, JSON.stringify({ at: today(), from, to: SCHEMA, data: raw }));
+  }catch(e){}                                // a full disk is not a reason to block the upgrade
+}
+
+function preSnapshot(){
+  try{
+    const s = localStorage.getItem(PRE_KEY);
+    return s ? JSON.parse(s) : null;
+  }catch(e){ return null; }
+}
+
+function load(){
+  let raw = null;
+  try{
+    raw = localStorage.getItem(KEY);
+    if(raw){
+      const parsed = JSON.parse(raw);
+      const from = Number(parsed && parsed.schema) || 1;
+      if(from < SCHEMA) snapshotBefore(raw, from);
+      D = migrate(parsed);
+    }
     // a backup still carries scratch inside D; the standalone key is the fresher copy
     try{
       const sc = localStorage.getItem(SCRATCH_KEY);
@@ -452,10 +483,59 @@ function load(){
     }catch(e){}
     if(raw) save();               // write the upgraded shape back
   }catch(e){
-    err = e instanceof NewerData
-      ? `This data was written by a newer version of the app (v${e.message}). Update the app before using it — nothing has been overwritten.`
-      : "Saved data looks damaged. Restore from a backup file.";
+    blocked = { kind: e instanceof NewerData ? "newer" : "damaged",
+                version: e instanceof NewerData ? e.message : null, raw };
   }
+}
+
+/* Nearly every "this app is out of date" is a stale copy of index.html sitting in
+   Safari's HTTP cache, not a real rollback — the home screen icon holds whatever URL
+   was saved when it was added, so it can keep serving an old build for a while. Try a
+   cache-busting reload once, automatically, before showing anyone the wall. The
+   sessionStorage flag stops it looping if the old file is genuinely what is deployed. */
+const RELOAD_FLAG = "gymlog.reloaded";
+
+function reloadFresh(){
+  try{ sessionStorage.setItem(RELOAD_FLAG, "1"); }catch(e){}
+  location.replace(location.pathname + "?v=" + Date.now());
+}
+
+function selfHealStaleBuild(){
+  if(!blocked || blocked.kind !== "newer") return false;
+  let tried = false;
+  try{ tried = sessionStorage.getItem(RELOAD_FLAG) === "1"; }catch(e){}
+  if(tried) return false;
+  reloadFresh();
+  return true;
+}
+
+// dump whatever is in storage to a file, readable or not
+function downloadRaw(){
+  try{
+    const text = (blocked && blocked.raw) || localStorage.getItem(KEY) || "";
+    const blob = new Blob([text], { type:"application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `gym-raw-${today()}.json`;
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    note = "Saved. In the share sheet choose Save to Files.";
+  }catch(e){ err = "Couldn't save the file."; }
+  render();
+}
+
+function restorePreSnapshot(){
+  const snap = preSnapshot();
+  if(!snap || !snap.data) return;
+  if(!confirm(`Roll back to the copy taken on ${snap.at}, before the upgrade from v${snap.from} to v${snap.to}? Anything logged since then is lost.`)) return;
+  try{
+    const parsed = JSON.parse(snap.data);
+    blocked = null;                      // the snapshot is readable by definition of how it was taken
+    D = migrate(parsed);
+    save(); saveScratch(); invalidateFoods(); invalidateLogStats(); ensureSelection(); seedDraft();
+    note = `Rolled back to the ${snap.at} copy.`;
+  }catch(e){ err = "That snapshot could not be read."; }
+  render();
 }
 
 /* ============ rest timer ============ */
@@ -1277,9 +1357,19 @@ function tdeeCard(){
 const STORAGE_BUDGET = 2.5*1048576;   // 2.5 M characters
 const kb = n => n < 1024 ? n + " B" : (n/1024).toFixed(n < 102400 ? 1 : 0) + " KB";
 
+function preSnapshotCard(){
+  const snap = preSnapshot();
+  if(!snap) return "";
+  return `<div class="card">
+    <div class="lift"><h3>Before the last upgrade</h3><span class="last">${esc(snap.at)}</span></div>
+    <p class="sub" style="margin:6px 0 10px;line-height:1.5">A copy of your data is kept automatically whenever the app upgrades its format — this one was taken going from v${snap.from} to v${snap.to}. It exists so a rolled-back app has something to fall back on. Restoring loses anything logged since that date.</p>
+    <button class="ghost" onclick="restorePreSnapshot()">Roll back to this copy</button>
+  </div>`;
+}
+
 function storageStats(){
   const len = k => { try{ const v = localStorage.getItem(k); return v ? v.length : 0; }catch(e){ return 0; } };
-  const core = len(KEY), scratch = len(SCRATCH_KEY);
+  const core = len(KEY), scratch = len(SCRATCH_KEY), snap = len(PRE_KEY);
   const log = JSON.stringify(NUT().log||{}).length;
   const sessions = JSON.stringify(D.sessions||[]).length;
   const foods = JSON.stringify(NUT().foods||[]).length;
@@ -1290,8 +1380,8 @@ function storageStats(){
   const first = [days[0], sdates[0]].filter(Boolean).sort()[0];
   const span = first ? Math.max(1, (pd(today()) - pd(first))/864e5) : 0;
   const perDay = span ? (log + sessions) / span : 0;
-  const left = STORAGE_BUDGET - (core + scratch);
-  return { core, scratch, log, sessions, foods, total:core+scratch, perDay,
+  const left = STORAGE_BUDGET - (core + scratch + snap);
+  return { core, scratch, snap, log, sessions, foods, total:core+scratch+snap, perDay,
            years: perDay > 0 ? left / perDay / 365 : null };
 }
 
@@ -1306,7 +1396,8 @@ function storageCard(){
     <div class="bar" style="margin:10px 0 8px"><div style="width:${Math.max(pct,0.5)}%;background:var(--accent)"></div></div>
     <div class="sub">${kb(st.total)} of a ${(STORAGE_BUDGET/1048576).toFixed(1)} MB budget</div>
     <div class="sub" style="margin-top:8px;line-height:1.6">
-      diet log ${kb(st.log)} · training ${kb(st.sessions)} · your foods ${kb(st.foods)} · in progress ${kb(st.scratch)}
+      diet log ${kb(st.log)} · training ${kb(st.sessions)} · your foods ${kb(st.foods)}<br>
+      in progress ${kb(st.scratch)} · pre-upgrade copy ${kb(st.snap)}
     </div>
     <p class="sub" style="margin-top:8px;line-height:1.5">${life}</p>
     <p class="sub" style="margin-top:8px;line-height:1.5;color:var(--dimmer)">Safari allows roughly 5 MB of text per site and may count each character as two bytes, so this compares against the pessimistic 2.5 MB. Exports are unaffected by the limit.</p>
@@ -1334,6 +1425,7 @@ function viewBackup(){
   </p>
   <p class="sub mono" style="margin-top:8px">Data format v${SCHEMA}</p>
   <div style="height:16px"></div>
+  ${preSnapshotCard()}
   ${storageCard()}`;
 }
 
@@ -1658,6 +1750,7 @@ let LIB = [];                         // in-memory library rows, pre-sorted
 let LIB_BY_ID = new Map();
 let libState = "idle";                // idle | loading | ready | error
 let libMsg = "", libFrom = "";
+let libDocVersion = null, libLoadedAt = null;   // what landed, and when
 let libDropped = null;                // rows reconcileSeeds() removed on this load
 const SEED_URL = "starter-foods.json";
 const FOOD_RESULTS = 25;              // max food cards rendered for one search
@@ -1757,17 +1850,29 @@ function buildLib(rows){
 async function loadLibrary(force){
   libState = "loading"; libMsg = ""; render();
   const v = new URLSearchParams(location.search).get("v") || "1";
+  // A forced reload has to change the URL, not just the request's cache mode. The page
+  // and the JSON share one ?v=, so re-requesting the same URL can still be answered
+  // from the GitHub Pages CDN edge inside its TTL — and iOS ignores cache:"reload"
+  // outright in a standalone home-screen app. A unique query string cannot be cached
+  // by anything, because nothing has ever seen it.
+  const url = SEED_URL + "?v=" + encodeURIComponent(v) + (force ? "&t=" + Date.now() : "");
+  const before = LIB.length;
   try{
-    const res = await fetch(SEED_URL + "?v=" + encodeURIComponent(v), { cache: force ? "reload" : "default" });
+    const res = await fetch(url, { cache: force ? "reload" : "default" });
     if(!res.ok) throw new Error("HTTP " + res.status);
     const doc = await res.json();
     const rows = Array.isArray(doc.foods) ? doc.foods : [];
     if(!rows.length) throw new Error("the file contained no foods");
     buildLib(rows);
     libFrom = "network";
+    libDocVersion = doc.version != null ? doc.version : null;
+    libLoadedAt = new Date();
     const dropped = reconcileSeeds();
     if(dropped) libDropped = dropped;          // stay quiet when there was nothing to do
     libState = "ready";
+    if(force) libMsg = before === LIB.length
+      ? `Reloaded — still ${commas(LIB.length)} foods. If you just changed the file, the deploy may not have landed yet.`
+      : `Reloaded — ${commas(before)} → ${commas(LIB.length)} foods.`;
   }catch(ex){
     // No local mirror: the app itself has to come off the network anyway, so a copy
     // in localStorage only covered the case where the HTTP cache kept index.html and
@@ -1980,11 +2085,16 @@ function libraryCard(){
   const seeds = (NUT().foods||[]).filter(f=>f.src==="seed").length;
   const hid = (NUT().hidden||[]).length;
   const status = libState==="loading" ? "loading…"
-               : libState==="ready" ? `${LIB.length} foods`
+               : libState==="ready" ? `${commas(LIB.length)} foods`
                : "not loaded";
+  const stamp = libState === "ready" && libLoadedAt
+    ? `Loaded ${libLoadedAt.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"})}${
+        libDocVersion != null ? ` · file version ${esc(String(libDocVersion))}` : ""}`
+    : "";
   let h = `<div class="card">
     <div class="lift"><h3>Food library</h3><span class="last">${status}</span></div>
     <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. It is fetched fresh each time the app opens, which needs a connection. Editing one saves your version; deleting one hides it. Row-by-row sourcing sits in <span class="mono">starter-foods-provenance.json</span>, which the app never loads.</p>
+    ${stamp ? `<div class="sub mono" style="margin-bottom:8px;color:var(--dimmer)">${stamp}</div>` : ""}
     <div class="sub" style="margin-bottom:10px">Your own foods: ${mineCount}${seeds ? ` · ${seeds} saved copies from the old import` : ""}${hid ? ` · ${hid} hidden` : ""}</div>
     <button class="ghost" ${libState==="loading"?"disabled":""} onclick="loadLibrary(true)">${libState==="loading"?"Loading…":"Reload library"}</button>`;
   if(seeds) h += `<button class="ghost" style="margin-top:8px" onclick="pruneSeedCopies()">Drop saved copies the library already provides</button>`;
@@ -2936,6 +3046,7 @@ async function importAll(e){
 
     const upgraded = migrate(Object.assign({}, parsed.data, { schema:v }));   // throws before anything is written
     D = upgraded;
+    blocked = null;                     // a good file supersedes whatever we couldn't read
     save(); saveScratch(); invalidateFoods(); invalidateLogStats(); ensureSelection(); seedDraft();
     note = v < SCHEMA
       ? `Restored from a v${v} backup and upgraded to v${SCHEMA}.`
@@ -2943,6 +3054,26 @@ async function importAll(e){
   }catch(ex){ err = "That file isn't a gym backup, or it's damaged. Nothing was changed."; }
   e.target.value = "";
   render();
+}
+
+/* ============ recovery ============ */
+function viewBlocked(){
+  const snap = preSnapshot();
+  const newer = blocked.kind === "newer";
+  let h = `<div class="card">
+    <div class="lift"><h3>${newer ? "This app is out of date" : "Saved data couldn't be read"}</h3></div>
+    <p class="sub" style="margin-top:8px;line-height:1.6">${newer
+      ? `Your data was written by version ${esc(blocked.version)} of the app, and this copy only understands up to ${SCHEMA}. That happens when the page is served from an older build — reload, and if that doesn't fix it, the deployed file needs to go back to the newer version.`
+      : `The saved data is present but not valid. Nothing has been changed.`}</p>
+    <p class="sub" style="margin-top:8px;line-height:1.6;color:var(--accent)">Nothing is being written while this message is showing, so your data is exactly as you left it. Don't clear the app or reinstall it.</p>
+    ${newer ? `<button class="primary" style="margin-top:12px" onclick="reloadFresh()">Reload the app</button>` : ""}
+    <button class="${newer ? "ghost" : "primary"}" style="margin-top:8px" onclick="downloadRaw()">Save a copy of the data to a file</button>`;
+  if(snap) h += `<button class="ghost" style="margin-top:8px" onclick="restorePreSnapshot()">Roll back to the ${esc(snap.at)} copy (before the v${snap.from} → v${snap.to} upgrade)</button>`;
+  h += `<input type="file" accept="application/json" id="impFile" class="hide" onchange="importAll(event)">
+    <button class="ghost" style="margin-top:8px" onclick="document.getElementById('impFile').click()">Restore from a backup file</button>
+  </div>`;
+  if(note) h += `<div class="ok">${esc(note)}</div>`;
+  return h;
 }
 
 /* ============ render ============ */
@@ -2956,6 +3087,12 @@ function render(){
     focus = { id:act.id, sel };
   }
 
+  if(blocked){
+    // no tabs: every other screen can write, and writing is the one thing to avoid here
+    document.getElementById("app").innerHTML = (err ? `<div class="err">${esc(err)}</div>` : "") + viewBlocked();
+    document.getElementById("nav").innerHTML = "";
+    return;
+  }
   const views = { train:viewTrain, plan:viewPlan, diet:viewDiet, weight:viewWeight, summary:viewSummary, backup:viewBackup };
   document.getElementById("app").innerHTML =
     (err ? `<div class="err">${esc(err)}</div>` : "") + views[tab]();
@@ -2988,16 +3125,19 @@ document.addEventListener("touchend", e=>{
 }, {passive:true});
 
 load();
-loadAiSettings();
-ensureSelection();
-seedDraft();
-render();
-loadLibrary();                    // async — the UI is usable immediately, foods appear when it lands
+// a stale cached build navigates away here rather than starting up
+if(!selfHealStaleBuild()){
+  loadAiSettings();
+  ensureSelection();
+  seedDraft();
+  render();
+  loadLibrary();                  // async — the UI is usable immediately, foods appear when it lands
 
-// iOS can suspend or kill a backgrounded web app with no further events, so commit
-// any debounced write the moment the app stops being visible
-addEventListener("pagehide", flushPending);
-document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden") flushPending(); });
+  // iOS can suspend or kill a backgrounded web app with no further events, so commit
+  // any debounced write the moment the app stops being visible
+  addEventListener("pagehide", flushPending);
+  document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "hidden") flushPending(); });
+}
 </script>
 </body>
 </html>
