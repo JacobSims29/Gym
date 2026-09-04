@@ -1450,11 +1450,14 @@ function cloudBackupCard(){
     if(syncList && syncList.length){
       h += `<div class="card" style="padding:0">`;
       h += syncList.map(b => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)">
-          <div><div style="font-size:14px">${esc(shortD(b.date))}${b.date === today() ? ` <span class="sub">· today, still being updated</span>` : ""}</div>
+          <div><div style="font-size:14px">${esc(shortD(b.date))}${b.date === today() ? ` <span class="sub">· today's copy</span>` : ""}</div>
           <div class="sub">${b.bytes ? Math.round(b.bytes/1024)+" KB" : ""}${b.at ? " · written " + esc(clockOf(b.at)) : ""}</div></div>
           <button class="ghost" style="margin:0;width:auto;padding:6px 10px;font-size:12px" onclick="cloudRestore('${esc(b.date)}')">Restore</button>
         </div>`).join("");
-      h += `</div>`;
+      h += `</div>
+        <p class="sub" style="margin-top:8px;line-height:1.5">Today's copy is rewritten each time
+        a backup runs. Earlier days are frozen and cannot change, so a bad day can always be
+        stepped back from.</p>`;
     }
   }
 
