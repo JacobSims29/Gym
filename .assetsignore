@@ -1,4 +1,10 @@
+.git
+.wrangler
+node_modules
+.DS_Store
 src
 wrangler.jsonc
+package.json
+package-lock.json
 .assetsignore
 starter-foods-provenance.json
