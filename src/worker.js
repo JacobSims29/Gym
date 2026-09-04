@@ -35,13 +35,10 @@ async function codeHash(code) {
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
 }
 
-/* Only codes you have listed may use this Worker at all. Backups written under an
-   unknown code would only waste storage, but model calls under an unknown code spend
-   real money, so the same gate covers both and there is one place to revoke someone. */
-function allowed(code, env) {
-  const list = (env.ALLOWED_CODES || "").split(",").map(s => s.trim()).filter(Boolean);
-  return list.includes(code);
-}
+/* Only codes listed in the ALLOWED_CODES secret may use this Worker at all. Backups
+   written under an unknown code would only waste storage, but model calls under an
+   unknown code spend real money, so one gate covers both routes and there is a single
+   place to revoke someone. Comma-separated, no quotes, exact match. */
 
 export default {
   async fetch(request, env) {
@@ -52,7 +49,13 @@ export default {
     const code = (request.headers.get("x-gym-code") || "").trim();
     if (code.length < MIN_CODE) return json({ error: "Missing or too-short access code" }, 401);
     if (!/^[A-Za-z0-9._-]{12,80}$/.test(code)) return json({ error: "Bad access code" }, 401);
-    if (!allowed(code, env)) return json({ error: "That access code is not recognised" }, 403);
+    /* Two different faults, two different messages: an empty allowlist means the secret
+       was never set, which looks identical to a wrong code unless it says so. */
+    const list = (env.ALLOWED_CODES || "").split(",").map(s => s.trim()).filter(Boolean);
+    if (!list.length) return json({ error: "No ALLOWED_CODES secret is set on the server" }, 403);
+    if (!list.includes(code)) {
+      return json({ error: `That access code is not on the list (server has ${list.length} code(s) configured)` }, 403);
+    }
 
     const h = await codeHash(code);
     const prefix = `bk:${h}:`;
