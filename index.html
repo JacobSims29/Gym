@@ -357,7 +357,7 @@ const MIGRATIONS = {
     if(!d.scratch) d.scratch = {};
     return d;
   },
-  // 8 → 9: AI coach (goals, biweekly analysis, follow-ups)
+  // 8 → 9: AI coach (goals, periodic analysis, follow-ups)
   8(d){
     if(!d.coach) d.coach = { goals:"", lastRun:null, current:null };
     return d;
@@ -2557,7 +2557,7 @@ function togglePast(i){ openPast[i] = !openPast[i]; render(); }
 const COACH_SYSTEM =
 `You are a single trusted expert combining three roles: a licensed physical therapist, a registered dietitian, and a science-based strength & conditioning coach. You give evidence-based, practical, specific guidance.
 
-You will receive a compiled summary of the user's full logged history: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals. You may also receive the analyses you wrote in previous sessions. Treat those as your own memory: check whether your earlier recommendations were followed and what happened, say plainly when something you predicted or prescribed did not work, and build on that advice instead of restating it. Analyses are run roughly every two weeks, so the window since your last one is the main thing to judge.
+You will receive a compiled summary of the user's full logged history: bodyweight and its trend, nutrition targets and adherence, and training sessions with per-exercise volume, plus the user's written goals. You may also receive the analyses you wrote in previous sessions. Treat those as your own memory: check whether your earlier recommendations were followed and what happened, say plainly when something you predicted or prescribed did not work, and build on that advice instead of restating it. Analyses are run roughly weekly, so the window since your last one is the main thing to judge. A week is a short window: expect noise, and do not over-read a single week's bodyweight movement or a one-session change in volume.
 
 Deliver, in clear structured sections with short headers:
 1. Progress — where they are versus their goals, reading the bodyweight trend and adherence honestly.
@@ -2751,8 +2751,8 @@ async function callCoach(messages, maxTokens){
 
 function saveGoals(v){ D.coach.goals = v; save(); }
 
-/* Two-week lock: days still to wait before a new analysis is allowed (0 = ready) */
-const COACH_INTERVAL = 14;
+/* Weekly lock: days still to wait before a new analysis is allowed (0 = ready) */
+const COACH_INTERVAL = 7;
 function lockDaysLeft(){
   const lr = D.coach.lastRun;
   if(!lr) return 0;
@@ -2786,7 +2786,6 @@ function followupsUsed(){
 
 async function sendFollowup(){
   if(!D.coach.current) return;
-  if(followupsUsed() >= 5){ coachMsg = "You've used all 5 follow-ups for this analysis."; render(); return; }
   const text = (document.getElementById("followupInput").value || "").trim();
   if(!text){ return; }
   coachBusy = true; coachMsg = "Thinking…"; render();
@@ -2824,7 +2823,7 @@ function viewSummary(){
   </div>`;
 
   const hasAnalysis = c.current && c.current.messages.some(m => m.role==="assistant" && (m.content||"").trim());
-  const left = lockDaysLeft();            // two-week lock between analyses
+  const left = lockDaysLeft();            // weekly lock between analyses
   h += `<div class="card">`;
   if(!syncCode){
     h += `<p class="sub">Set your access code on the <b>Backup</b> tab to enable AI analysis.</p>`;
@@ -2848,14 +2847,10 @@ function viewSummary(){
       h += `<div class="coachmsg ${isUser?"cu":"ca"}">${isUser ? esc(m.content) : mdToHtml(m.content)}</div>`;
     });
     const used = followupsUsed();
-    if(used < 5){
-      h += `<div class="card">
-        <textarea id="followupInput" class="ta" rows="2" placeholder="Ask a follow-up…"></textarea>
-        <button class="primary" style="margin-top:8px" ${coachBusy?"disabled":""} onclick="sendFollowup()">Send · ${used}/5 used</button>
-      </div>`;
-    } else {
-      h += `<p class="sub" style="text-align:center;margin-top:12px">All 5 follow-ups used for this analysis. A new analysis resets them.</p>`;
-    }
+    h += `<div class="card">
+      <textarea id="followupInput" class="ta" rows="2" placeholder="Ask a follow-up…"></textarea>
+      <button class="primary" style="margin-top:8px" ${coachBusy?"disabled":""} onclick="sendFollowup()">Send${used?` · ${used} so far`:""}</button>
+    </div>`;
   }
 
   const hist = c.history || [];
