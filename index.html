@@ -1447,6 +1447,7 @@ function cloudBackupCard(){
                        : `Last attempt ${rel} failed: ${esc(syncState.msg)}`}
     </div>
     <button class="ghost" onclick="cloudBackup(true)" ${syncBusy?"disabled":""} style="margin-bottom:8px">${syncBusy?"Working…":"⬆ Send a copy now"}</button>
+    ${syncState.ok===false && /Refused|not overwriting/.test(syncState.msg||"") ? `<button class="ghost" onclick="if(confirm('This will replace today\'s cloud copy with what is on this device. Continue?')) cloudBackup(true, true)" style="margin-bottom:8px">Send anyway (overwrite today's copy)</button>` : ""}
     <button class="ghost" onclick="cloudRefreshList()" ${syncBusy?"disabled":""} style="margin-bottom:12px">☁ Show cloud backups</button>`;
 
     if(syncList && syncList.length){
@@ -3156,15 +3157,32 @@ function saveSyncCode(){
   }
   syncCode = raw;
   try{ raw ? localStorage.setItem(SYNC_CODE_LS, raw) : localStorage.removeItem(SYNC_CODE_LS); }catch(e){}
-  syncList = null; err = ""; note = raw ? "Access code saved. Backing up now…" : "Cloud backup turned off.";
+  syncList = null; err = "";
+  note = raw ? "Access code saved. Looking for existing backups…" : "Cloud backup turned off.";
   render();
-  if(raw) cloudBackup(true);
+  /* Deliberately a read, not a write. On a fresh device the first thing you want is to
+     see what is already up there — pushing an empty app at it is how you lose a day. */
+  if(raw) cloudRefreshList();
 }
 
-async function cloudBackup(manual){
+/* A freshly installed app has data that reads perfectly and contains nothing. The
+   write lock does not catch that, and on the same day it lands on the same key as a
+   real backup — so this is the guard that stops nothing overwriting something. */
+function looksEmpty(){
+  return !(D.sessions||[]).length
+      && !(D.weights||[]).length
+      && !Object.keys((D.nutrition && D.nutrition.log) || {}).length;
+}
+
+async function cloudBackup(manual, force){
   // Rule 1: if the saved data could not be read, this copy of D is not the real one.
   // Uploading it would put a wrong copy on top of a right one.
   if(blocked || !syncCode || syncBusy) return;
+  if(looksEmpty() && !force){
+    syncState = { at: Date.now(), ok:false, msg:"nothing to back up yet — not overwriting the copy in the cloud" };
+    saveSyncState(); if(manual) render();
+    return;
+  }
   if(!manual && !syncDirty) return;
   if(!manual && syncState.at && Date.now() - syncState.at < SYNC_EVERY) return;
   syncBusy = true;
@@ -3173,7 +3191,8 @@ async function cloudBackup(manual){
   try{
     const res = await fetch(SYNC_URL, {
       method: "POST",
-      headers: { "content-type":"application/json", "x-gym-code": syncCode, "x-gym-date": today() },
+      headers: { "content-type":"application/json", "x-gym-code": syncCode, "x-gym-date": today(),
+                 ...(force ? { "x-gym-force":"yes" } : {}) },
       body: payload
     });
     const out = await res.json().catch(()=>null);
@@ -3206,6 +3225,7 @@ async function cloudRefreshList(){
     if(!out || !Array.isArray(out.backups)) throw new Error("no backup list came back — is the Worker deployed?");
     syncList = out.backups;
     if(!syncList.length) note = "No cloud backups yet under that access code.";
+    else if(looksEmpty()) note = `Found ${syncList.length} backup${syncList.length>1?"s":""}. This device has no history yet — restore one below rather than backing up, or you will overwrite it.`;
   }catch(e){ err = "Couldn't reach the cloud backup: " + ((e && e.message) || e); }
   syncBusy = false;
   render();
