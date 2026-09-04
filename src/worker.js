@@ -40,6 +40,19 @@ async function codeHash(code) {
    unknown code spend real money, so one gate covers both routes and there is a single
    place to revoke someone. Comma-separated, no quotes, exact match. */
 
+/* The device sends its own local date. Filing by UTC put an evening backup in Mountain
+   time under tomorrow's date and split a single day across two keys. Anything more than
+   a day away from UTC is ignored, so a wrong clock cannot scatter keys across the store. */
+function localDay(request) {
+  const utc = new Date();
+  const claimed = (request.headers.get("x-gym-date") || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(claimed)) {
+    const drift = Math.abs(new Date(claimed + "T12:00:00Z") - utc);
+    if (drift < 36 * 3600 * 1000) return claimed;
+  }
+  return utc.toISOString().slice(0, 10);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -68,8 +81,7 @@ export default {
       /* A daily ceiling per code, so a code that leaks cannot drain the account before
          you notice. KV is eventually consistent, so this counts approximately — it is a
          spend guard, not an accounting record. */
-      const day = new Date().toISOString().slice(0, 10);
-      const capKey = `ai:${h}:${day}`;
+      const capKey = `ai:${h}:${localDay(request)}`;
       const used = Number(await env.BACKUPS.get(capKey)) || 0;
       if (used >= AI_PER_DAY) {
         return json({ error: `Daily limit of ${AI_PER_DAY} model calls reached for this access code.` }, 429);
@@ -88,7 +100,24 @@ export default {
         },
         body: request.body
       });
-      return new Response(upstream.body, {
+      /* A 2xx is streamed straight through untouched — that is the hot path and the body
+         may be large. Anything else is read and relabelled, because the app looks for
+         Anthropic's {error:{message}} and would otherwise report a blank reply. */
+      if (upstream.ok) {
+        return new Response(upstream.body, {
+          status: upstream.status,
+          headers: { "content-type": "application/json", "cache-control": "no-store" }
+        });
+      }
+      const detail = (await upstream.text()).slice(0, 600);
+      let message = `Anthropic returned ${upstream.status}`;
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed && parsed.error && parsed.error.message) message += ": " + parsed.error.message;
+      } catch (e) {
+        if (detail) message += ": " + detail;
+      }
+      return new Response(JSON.stringify({ error: { message }, message }), {
         status: upstream.status,
         headers: { "content-type": "application/json", "cache-control": "no-store" }
       });
@@ -107,7 +136,7 @@ export default {
         return json({ error: "Not a gym backup" }, 400);
       }
 
-      const date = new Date().toISOString().slice(0, 10);
+      const date = localDay(request);
       /* One key per day, expiring on its own after a fortnight. Today's key is rewritten
          through the day; earlier days are frozen. That is what makes a bad migration
          survivable: it can only spoil today. */
