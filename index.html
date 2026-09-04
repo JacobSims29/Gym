@@ -1419,6 +1419,7 @@ function storageCard(){
   </div>`;
 }
 
+const clockOf = iso => { try{ return new Date(iso).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; } };
 function cloudBackupCard(){
   const when = syncState.at ? new Date(syncState.at) : null;
   const mins = when ? Math.floor((Date.now() - syncState.at)/60000) : null;
@@ -1449,8 +1450,8 @@ function cloudBackupCard(){
     if(syncList && syncList.length){
       h += `<div class="card" style="padding:0">`;
       h += syncList.map(b => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)">
-          <div><div style="font-size:14px">${esc(shortD(b.date))}</div>
-          <div class="sub">${b.bytes ? Math.round(b.bytes/1024)+" KB" : ""}</div></div>
+          <div><div style="font-size:14px">${esc(shortD(b.date))}${b.date === today() ? ` <span class="sub">· today, still being updated</span>` : ""}</div>
+          <div class="sub">${b.bytes ? Math.round(b.bytes/1024)+" KB" : ""}${b.at ? " · written " + esc(clockOf(b.at)) : ""}</div></div>
           <button class="ghost" style="margin:0;width:auto;padding:6px 10px;font-size:12px" onclick="cloudRestore('${esc(b.date)}')">Restore</button>
         </div>`).join("");
       h += `</div>`;
@@ -3163,6 +3164,7 @@ async function cloudBackup(manual){
   if(!manual && syncState.at && Date.now() - syncState.at < SYNC_EVERY) return;
   syncBusy = true;
   const payload = JSON.stringify({app:"gymlog",version:SCHEMA,exported:today(),data:D});
+  let wasShowing = false;
   try{
     const res = await fetch(SYNC_URL, {
       method: "POST",
@@ -3176,13 +3178,16 @@ async function cloudBackup(manual){
        recorded as a successful backup. Only the Worker sends back ok + date. */
     if(!out || out.ok !== true || !out.date) throw new Error("no confirmation from the server — is the Worker deployed?");
     syncDirty = false;
-    syncList = null;                                     // the date list just changed
     syncState = { at: Date.now(), ok: true, msg: `${Math.round(payload.length/1024)} KB` };
+    wasShowing = syncList !== null;                      // refetch below only if it is on screen
   }catch(e){
     syncState = { at: Date.now(), ok: false, msg: String((e && e.message) || e) };
   }
   syncBusy = false;
   saveSyncState();
+  /* A send rewrites today's row rather than adding one, so without a refetch the list
+     looks untouched and a successful backup looks like nothing happened. */
+  if(wasShowing) return cloudRefreshList();
   if(manual) render();
 }
 
