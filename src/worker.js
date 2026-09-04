@@ -137,6 +137,23 @@ export default {
       }
 
       const date = localDay(request);
+
+      /* Refuse a copy that is drastically smaller than the one already filed for the
+         same day, unless the caller insists. A backup shrinking by half is almost always
+         a reset or half-installed device rather than a real edit — and because same-day
+         copies share a key, that write is destructive. The daily keys protect yesterday;
+         this protects today. */
+      if (request.headers.get("x-gym-force") !== "yes") {
+        const existing = (await env.BACKUPS.list({ prefix })).keys
+          .find(k => k.name === prefix + date);
+        const had = existing && existing.metadata && existing.metadata.bytes;
+        if (had && had > 20000 && body.length < had * 0.6) {
+          return json({
+            error: `Refused: this copy is ${Math.round(body.length/1024)} KB but today's stored copy is ${Math.round(had/1024)} KB. That much shrinkage usually means a device with no history. Send again with force if it is intentional.`,
+            refused: "shrink", had, got: body.length
+          }, 409);
+        }
+      }
       /* One key per day, expiring on its own after a fortnight. Today's key is rewritten
          through the day; earlier days are frozen. That is what makes a bad migration
          survivable: it can only spoil today. */
