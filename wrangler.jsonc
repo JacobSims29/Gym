@@ -1,5 +1,6 @@
 {
-  "name": "gymlog",
+  // Must match the Worker name Cloudflare created, or the build warns and overrides it.
+  "name": "gym",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
   "assets": { "directory": "." },

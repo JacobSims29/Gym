@@ -1,0 +1,8 @@
+{
+  "name": "gym",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "4.129.0"
+  },
+  "type": "module"
+}
