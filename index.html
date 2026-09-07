@@ -95,6 +95,11 @@
   .copyrow{padding:12px 16px;border-top:1px solid var(--line)}
   .pill{font-size:12px;font-family:ui-monospace,Menlo,monospace;background:#1e293b;color:#93c5fd;padding:3px 8px;border-radius:10px;margin-left:6px}
   .pill.p{background:#2e1065;color:#c4b5fd}
+  .pill.c{background:#052e21;color:#34d399}
+  .pill.f{background:#3a2606;color:#fbbf24}
+  /* four macro pills and the + button do not fit one phone line; let them wrap right */
+  .mpills{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;row-gap:4px}
+  .mpills .pill{padding:3px 6px;margin-left:4px}
   .fitem{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-top:1px solid var(--line)}
   .fitem .fn{font-size:15px}
   .fitem .fq{font-size:12px;color:var(--dimmer);margin-top:2px}
@@ -1679,7 +1684,8 @@ function dietDay(){
   const yesterday = iso(new Date(pd(dietDate).getTime() - 864e5));
   MEALS.forEach(meal=>{
     const entries = dayEntries(dietDate).filter(e=>e.meal===meal);
-    const mt = entries.reduce((s,e)=>{ const m=entryMacros(e); s.cal+=m.cal; s.p+=m.protein; return s; }, {cal:0,p:0});
+    const mt = entries.reduce((s,e)=>{ const m=entryMacros(e);
+      s.cal+=m.cal; s.p+=m.protein; s.c+=m.carb; s.f+=m.fat; return s; }, {cal:0,p:0,c:0,f:0});
     const collapsed = !!mealCollapsed[meal];
     const yCount = dayEntries(yesterday).filter(e=>e.meal===meal).length;
     h += `<div class="meal" data-meal="${meal}">
@@ -1688,8 +1694,8 @@ function dietDay(){
           <span class="caret" style="margin:0 6px 0 0;display:inline-block">${collapsed?"▸":"▾"}</span>
           <h3 style="display:inline">${meal}</h3>
         </div>
-        <div>
-          <span class="pill">${round(mt.cal)} Cal</span><span class="pill p">${round(mt.p)} P</span>
+        <div class="mpills">
+          <span class="pill">${round(mt.cal)} Cal</span><span class="pill p">${round(mt.p)}P</span><span class="pill c">${round(mt.c)}C</span><span class="pill f">${round(mt.f)}F</span>
           <button class="plus" onclick="startAdd('${meal}')">+</button>
         </div>
       </div>`;
@@ -1708,7 +1714,7 @@ function dietDay(){
               <button class="icon" onclick="delEntry('${e.id}')">🗑</button>
             </div>
           </div>
-          <div class="fm"><b>${round(m.cal)}</b> cal<br><span style="color:var(--dimmer)">${round(m.protein)}g protein</span></div>
+          <div class="fm"><b>${round(m.cal)}</b> cal<br><span style="color:var(--dimmer)">${round(m.protein)}p · ${round(m.carb)}c · ${round(m.fat)}f</span></div>
         </div>`;
       });
       if(!entries.length && yCount){
@@ -1803,7 +1809,9 @@ function aiScanCard(){
   const canRun = scanImgs.length > 0 || (scanMode === "recipe" && scanDesc.trim().length > 20);
   h += `<div class="row">
     ${scanImgs.length < SCAN_MAX_IMGS ? `<button class="ghost grow" onclick="document.getElementById('scanFile').click()">${scanImgs.length?"Add another":"Choose or take a photo"}</button>` : ""}
-    ${canRun ? `<button class="primary grow" ${scanBusy?"disabled":""} onclick="runScan()">${scanBusy?"Working…":"Estimate nutrition"}</button>` : ""}
+    ${canRun ? (scanBusy
+        ? `<button class="ghost grow" onclick="cancelAi()">Working… · Cancel</button>`
+        : `<button class="primary grow" onclick="runScan()">Estimate nutrition</button>`) : ""}
   </div>`;
   if(scanMode === "recipe")
     h += `<p class="sub" style="margin-top:8px">Reads the ingredients, converts volumes to weights, and divides by the serving count. You get one serving by weight, so a bigger or smaller portion scales from it. Anything you type about changes you made overrides the recipe.</p>`;
@@ -2450,25 +2458,48 @@ If the panel is cut off or unreadable in part, say which numbers you had to infe
 ` + SCAN_CONTRACT
 };
 
+/* max_tokens is required by the API and caps output length, not time — a low value does
+   not stop a slow reply, it truncates it after the work is already done. The caps at the
+   call sites are set high enough never to bind; a request that drags on is ended by the
+   person, not a clock. The controller is held here so the Cancel button can reach it. */
+let aiAbort = null;                 // controller for the request in flight, if any
+let aiCancelled = false;            // distinguishes a deliberate cancel from a network abort
+function cancelAi(){
+  if(!aiAbort) return;
+  aiCancelled = true;
+  aiAbort.abort();
+}
+async function aiFetch(body){
+  const ctl = new AbortController();
+  aiAbort = ctl; aiCancelled = false;
+  try{
+    return await fetch(AI_URL, {
+      method: "POST",
+      headers: { "content-type":"application/json", "x-gym-code": syncCode, "x-gym-date": today() },
+      body: JSON.stringify(body),
+      signal: ctl.signal
+    });
+  }catch(e){
+    if(e && e.name === "AbortError"){
+      const err = new Error(aiCancelled ? "cancelled" : "the connection dropped before a reply arrived");
+      err.cancelled = aiCancelled;
+      throw err;
+    }
+    throw e;
+  }finally{ if(aiAbort === ctl) aiAbort = null; }
+}
+
 // The role and the output contract are fixed per mode, so they belong in `system`.
 // Only the images and the typed text vary, so only those are messages.
 async function callVision(imgs, desc, mode){
   const content = imgs.map(im => ({ type:"image", source:{ type:"base64", media_type: im.mediaType, data: im.data } }));
   content.push({ type:"text", text: (mode === "recipe" ? "Recipe text or notes from the user: " : "User description: ")
                                     + (desc.trim() || "(none provided)") });
-  const res = await fetch(AI_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-gym-code": syncCode,
-      "x-gym-date": today()
-    },
-    body: JSON.stringify({
-      model: AI_MODEL,
-      max_tokens: mode === "meal" ? 500 : 1200,   // adding up a recipe needs room to work
-      system: SCAN_SYSTEM[mode] || SCAN_SYSTEM.meal,
-      messages: [{ role:"user", content }]
-    })
+  const res = await aiFetch({
+    model: AI_MODEL,
+    max_tokens: mode === "meal" ? 4000 : 6000,   // headroom, not a budget; the timeout is the real bound
+    system: SCAN_SYSTEM[mode] || SCAN_SYSTEM.meal,
+    messages: [{ role:"user", content }]
   });
   if(!res.ok){
     let msg = "HTTP " + res.status;
@@ -2485,6 +2516,10 @@ async function callVision(imgs, desc, mode){
               : data.stop_reason ? `the model stopped early (${data.stop_reason}) without answering`
               : "the reply had no text: " + JSON.stringify(data).slice(0,200);
     throw new Error(why);
+  }
+  /* A run out of room looks like malformed JSON downstream, so say which it was. */
+  if(data.stop_reason === "max_tokens"){
+    throw new Error("the reply was cut off before it finished — the estimate ran out of room. Try again, or add a short description to make the guess easier");
   }
   const parsed = lastJson(text);
   const unit = parsed.unit === "ml" ? "ml" : "g";     // weight or volume, never a count
@@ -2543,7 +2578,9 @@ async function runScan(){
     render();
   }catch(ex){
     scanBusy = false;
-    scanMsg = "Scan failed: " + (ex.message || "try again") + ". This is an estimate feature — check your key and connection.";
+    scanMsg = ex.cancelled ? "Scan cancelled."
+            : "Scan failed: " + (ex.message || "try again")
+              + (/cut off|no JSON|ran out|connection dropped/.test(ex.message||"") ? "" : ". This is an estimate feature — check your access code and connection.");
     render();
   }
 }
@@ -2722,15 +2759,7 @@ function buildCoachContext(hist){
 
 async function callCoach(messages, maxTokens){
 
-  const res = await fetch(AI_URL, {
-    method:"POST",
-    headers:{
-      "content-type":"application/json",
-      "x-gym-code": syncCode,
-      "x-gym-date": today()
-    },
-    body: JSON.stringify({ model: AI_MODEL, max_tokens: maxTokens||1400, system: COACH_SYSTEM, messages })
-  });
+  const res = await aiFetch({ model: AI_MODEL, max_tokens: maxTokens || 8000, system: COACH_SYSTEM, messages });
   if(!res.ok){
     let msg = "HTTP " + res.status;
     try{ const j = await res.json(); if(j.error && j.error.message) msg = j.error.message; }catch(_){}
@@ -2775,7 +2804,10 @@ async function runAnalysis(force){
     coachBusy = false; coachMsg = "";
     save(); render();
   }catch(ex){
-    coachBusy = false; coachMsg = "Analysis failed: " + (ex.message || "try again") + " (check your key and connection).";
+    coachBusy = false;
+    coachMsg = ex.cancelled ? "Analysis cancelled."
+             : "Analysis failed: " + (ex.message || "try again")
+               + (/cut off|no JSON|ran out|connection dropped/.test(ex.message||"") ? "" : " (check your access code and connection).");
     render();
   }
 }
@@ -2798,7 +2830,8 @@ async function sendFollowup(){
     save(); render();
   }catch(ex){
     D.coach.current.messages.pop();   // undo optimistic push so they can retry
-    coachBusy = false; coachMsg = "Follow-up failed: " + (ex.message || "try again");
+    coachBusy = false;
+    coachMsg = ex.cancelled ? "Follow-up cancelled." : "Follow-up failed: " + (ex.message || "try again");
     render();
   }
 }
@@ -2833,7 +2866,9 @@ function viewSummary(){
       <p class="sub" style="margin-top:8px">Analyses run every ${COACH_INTERVAL} days so there is real change to judge. Last run ${shortD(c.lastRun)} · next ${shortD(next)}. Follow-ups below still work.</p>
       <p class="sub" style="margin-top:6px"><a href="#" style="color:var(--dim)" onclick="event.preventDefault();if(confirm('Run early? This archives the current analysis and resets the ${COACH_INTERVAL}-day timer.'))runAnalysis(true)">Run early anyway</a></p>`;
   } else {
-    h += `<button class="primary" ${coachBusy?"disabled":""} onclick="runAnalysis()">${coachBusy?"Working…":(hasAnalysis?"Run a new analysis":"Get AI analysis")}</button>
+    h += `${coachBusy
+        ? `<button class="ghost" onclick="cancelAi()">Working… · Cancel</button>`
+        : `<button class="primary" onclick="runAnalysis()">${hasAnalysis?"Run a new analysis":"Get AI analysis"}</button>`}
       <p class="sub" style="margin-top:8px">Evidence-based estimate from a PT / dietitian / coach persona — not medical advice. Uses your full history${(c.history||[]).length?" and your previous "+(c.history||[]).length+" analys"+((c.history||[]).length===1?"is":"es"):""}.</p>`;
   }
   if(coachMsg) h += `<p class="sub" style="margin-top:8px;color:${coachMsg.includes("failed")?"var(--bad)":"var(--dim)"}">${esc(coachMsg)}</p>`;
@@ -2849,7 +2884,9 @@ function viewSummary(){
     const used = followupsUsed();
     h += `<div class="card">
       <textarea id="followupInput" class="ta" rows="2" placeholder="Ask a follow-up…"></textarea>
-      <button class="primary" style="margin-top:8px" ${coachBusy?"disabled":""} onclick="sendFollowup()">Send${used?` · ${used} so far`:""}</button>
+      ${coachBusy
+        ? `<button class="ghost" style="margin-top:8px" onclick="cancelAi()">Working… · Cancel</button>`
+        : `<button class="primary" style="margin-top:8px" onclick="sendFollowup()">Send${used?` · ${used} so far`:""}</button>`}
     </div>`;
   }
 
