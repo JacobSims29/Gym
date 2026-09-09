@@ -95,6 +95,8 @@
   .copyrow{padding:12px 16px;border-top:1px solid var(--line)}
   .pill{font-size:12px;font-family:ui-monospace,Menlo,monospace;background:#1e293b;color:#93c5fd;padding:3px 8px;border-radius:10px;margin-left:6px}
   .pill.p{background:#2e1065;color:#c4b5fd}
+  .bwrow{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:13px;color:var(--dim)}
+  .bwrow input{width:auto;margin:0}
   .pill.c{background:#052e21;color:#34d399}
   .pill.f{background:#3a2606;color:#fbbf24}
   /* four macro pills and the + button do not fit one phone line; let them wrap right */
@@ -251,7 +253,7 @@ const START = "2026-07-06";
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const BUILD = "stage3";   // shown on the Backup tab so you can see which build is live
-const SCHEMA = 13;  // bump whenever the saved data shape changes, and add a migration below
+const SCHEMA = 14;  // bump whenever the saved data shape changes, and add a migration below
 const SCRATCH_KEY = "gymlog.scratch.v1";   // the hot path: rewritten while you type a set, kept out of the main blob
 const LIB_STALE_KEY = "gymlog.lib.v1";     // retired in v13; removed on load to reclaim the space
 const PRE_KEY = "gymlog.pre.v1";           // copy of the data as it stood before the last upgrade
@@ -422,6 +424,14 @@ const MIGRATIONS = {
     if(!("phase" in d)) d.phase = null;
     if(!Array.isArray(d.phases)) d.phases = [];
     if(!Array.isArray(d.mealTemplates)) d.mealTemplates = [];
+    return d;
+  },
+  // 13 → 14: exercises may carry `bw`, the bodyweight frozen in when the set was logged;
+  // foods carry `added`, the moment they were created. Both are absent on old records and
+  // are read as absent, so nothing here rewrites history — the field is only stamped on
+  // new records from now on. The bump exists so an older build refuses this data rather
+  // than silently computing volume without the bodyweight component.
+  13(d){
     return d;
   }
 };
@@ -678,9 +688,22 @@ function lastLiftBefore(name, date){
     .forEach(s => (s.exercises||[]).forEach(e => { if(e.name===name) found = e; }));
   return found;
 }
-// total volume of an exercise = sum over its sets of weight*reps
+/* Total volume = sum over sets of load*reps, where load is the weight on the bar plus, for
+   a bodyweight exercise, the bodyweight being moved. `bw` is the weigh-in resolved at the
+   moment the exercise was logged and frozen onto the record — recomputing it from today's
+   weight would quietly rewrite the volume of every past session every time you weigh in.
+   Absent `bw` is 0, so every existing record computes exactly as it did before. */
 function exVolume(e){
-  return (e.sets||[]).reduce((v,s)=> v + (parseFloat(s.weight)||0)*(parseFloat(s.reps)||0), 0);
+  const bw = parseFloat(e.bw) || 0;
+  return (e.sets||[]).reduce((v,s)=> v + (bw + (parseFloat(s.weight)||0))*(parseFloat(s.reps)||0), 0);
+}
+// the weigh-in in force on a given date: the most recent on or before it, else the earliest
+function bodyweightOn(date){
+  const asc = [...(D.weights||[])].sort((a,b)=>a.date.localeCompare(b.date));
+  if(!asc.length) return null;
+  let pick = null;
+  for(const w of asc){ if(w.date <= date) pick = w; else break; }
+  return (pick || asc[0]).value;
 }
 // most recent day with a step count (skips pre-Steps cardio-only records)
 function lastSteps(){
@@ -707,7 +730,17 @@ const commas = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 let uidCounter = 0;
 const scratchKey = () => trainDate + "|" + trainWorkout;
-function withUid(e){ return { _uid: ++uidCounter, name:e.name, sets:(e.sets||[]).map(s=>({weight:s.weight,reps:s.reps})) }; }
+/* Turning this on resolves the weigh-in for the session date once and stores the number.
+   It is a snapshot, not a live link: reweighing tomorrow must not change what this
+   session's volume was. Turning it off clears it. */
+function toggleBodyweight(i, on){
+  if(!on){ delete draft[i].bw; saveScratch(); render(); return; }
+  const bw = bodyweightOn(trainDate);
+  if(bw == null){ err = "Log a weigh-in first — there is no bodyweight to use."; render(); return; }
+  draft[i].bw = bw;
+  err = ""; saveScratch(); render();
+}
+function withUid(e){ return { _uid: ++uidCounter, name:e.name, bw:e.bw, sets:(e.sets||[]).map(s=>({weight:s.weight,reps:s.reps})) }; }
 
 function seedDraft(){
   const ex = sessionOn(trainDate, trainWorkout);
@@ -738,7 +771,7 @@ function seedDraft(){
 // the write is ~1 KB to its own key and debounced, instead of re-serialising all of D.
 function writeScratch(){
   if(!D.scratch) D.scratch = {};
-  D.scratch[scratchKey()] = draft.map(e => ({ name:e.name, sets:e.sets.map(s=>({weight:s.weight,reps:s.reps})) }));
+  D.scratch[scratchKey()] = draft.map(e => ({ name:e.name, bw:e.bw, sets:e.sets.map(s=>({weight:s.weight,reps:s.reps})) }));
   saveScratchSoon();
 }
 
@@ -841,11 +874,15 @@ function viewTrain(){
       h += `<input class="exname" style="margin:10px 0" type="text" placeholder="Exercise name"
               value="${esc(d.name)}" oninput="setExName(${i},this.value)">`;
       if(tmpl) h += `<div class="sub" style="margin-bottom:8px">Target: ${esc(tmpl.sets)}×${esc(tmpl.reps)}</div>`;
-      h += `<div class="setshead"><span>Set</span><span>lbs</span><span>reps</span><span></span></div>`;
+      const isBw = d.bw != null && d.bw !== "";
+      h += `<label class="bwrow"><input type="checkbox" ${isBw?"checked":""} onchange="toggleBodyweight(${i},this.checked)">
+        <span>Bodyweight exercise${isBw?` · ${fmtNum(Math.round(d.bw*10)/10)} lb`:""}</span></label>`;
+      if(isBw) h += `<p class="sub" style="margin:0 0 8px">Volume counts ${fmtNum(Math.round(d.bw*10)/10)} lb plus anything in the lbs column. Leave it blank for unweighted reps.</p>`;
+      h += `<div class="setshead"><span>Set</span><span>${isBw?"+lbs":"lbs"}</span><span>reps</span><span></span></div>`;
       d.sets.forEach((s,j)=>{
         h += `<div class="setrow">
           <span class="setnum">${j+1}</span>
-          <input class="num" type="number" inputmode="decimal" placeholder="lb" value="${esc(s.weight)}" oninput="setSetVal(${i},${j},'weight',this.value)">
+          <input class="num" type="number" inputmode="decimal" placeholder="${isBw?"added":"lb"}" value="${esc(s.weight)}" oninput="setSetVal(${i},${j},'weight',this.value)">
           <input class="num" type="number" inputmode="decimal" step="any" placeholder="reps" value="${esc(s.reps)}" oninput="setSetVal(${i},${j},'reps',this.value)">
           <button class="icon" onclick="delSet(${i},${j})" ${d.sets.length===1?"disabled":""}>🗑</button>
         </div>`;
@@ -1889,6 +1926,21 @@ const searchBlob = name => " " + tokenize(name).join(" ") + " ";
 const sortKey = f => String(f.name||"").replace(/^generic\s+/i, "").toLowerCase();
 function sortFoods(){ NUT().foods.sort((a,b)=>sortKey(a).localeCompare(sortKey(b))); }
 
+/* When a food was added. New ones carry `added`. Older ones do not, but uid() is
+   prefix + base36 milliseconds + a counter, so the timestamp can be read back out of
+   the id — which dates everything you have already saved instead of dumping it all in
+   one undated bucket. Foods promoted from the library keep the library's hash id and
+   have no timestamp in them, so those fall back to 0 and sort oldest. */
+function foodAddedAt(f){
+  if(f && typeof f.added === "number") return f.added;
+  const m = f && typeof f.id === "string" && /^f([0-9a-z]{8})/.exec(f.id);
+  if(m){
+    const t = parseInt(m[1], 36);
+    if(t > 946684800000 && t < Date.now() + 864e5) return t;   // sane: after 2000, not future
+  }
+  return 0;
+}
+
 // FNV-1a over the normalised name: short, and stable across reloads and rebuilds of the
 // file, so a logged entry keeps pointing at the same food. Row order is irrelevant except
 // for the collision tiebreak below, which for 500 rows is ~1-in-30,000 to ever be reached.
@@ -2233,9 +2285,16 @@ function dietFoods(){
     // nothing saved yet — the add box and starter library above are the whole tab
   } else if(!term){
     if(own.length){
+      const byRecent = NUT().foodSort === "recent";
       h += `<div class="lift" style="margin-bottom:8px"><h3>Your foods</h3><span class="last">${own.length}</span></div>`;
-      h += `<p class="sub" style="margin:0 0 12px">Foods you added or edited. The other ${total - own.length} come from the library — search to reach them.</p>`;
-      list = own;
+      h += `<p class="sub" style="margin:0 0 8px">Foods you added or edited. The other ${total - own.length} come from the library — search to reach them.</p>`;
+      h += `<div class="row" style="margin-bottom:12px">
+        <button class="${byRecent?"ghost":"primary"} grow" onclick="setFoodSort('name')">A–Z</button>
+        <button class="${byRecent?"primary":"ghost"} grow" onclick="setFoodSort('recent')">Recent</button>
+      </div>`;
+      list = byRecent
+        ? [...own].sort((a,b)=> foodAddedAt(b) - foodAddedAt(a) || sortKey(a).localeCompare(sortKey(b)))
+        : own;
     } else {
       h += `<p class="sub" style="text-align:center;padding:8px 0">Type to find a food. ${total} available, and anything you add shows up here.</p>`;
     }
@@ -2361,6 +2420,10 @@ function copyYesterdayMeal(meal){
 }
 function cancelAdd(){ addingMeal=null; render(); }
 function setFoodFilter(v){ foodFilter=v; render(); }
+function setFoodSort(mode){
+  NUT().foodSort = mode === "recent" ? "recent" : "name";
+  save(); render();
+}
 function setFoodSearch(v){ foodSearch=v; render(); }
 
 /* ============ AI meal scan (bring your own key) ============ */
@@ -2946,7 +3009,7 @@ function addFood(){
   const num = id => parseFloat(document.getElementById(id).value) || 0;
   const unit = document.getElementById("nfUnit").value;
   NUT().foods.push({
-    id:uid("f"), name,
+    id:uid("f"), name, added: Date.now(),
     amount: num("nfAmount") || UNIT_DEFAULT_AMOUNT[unit] || 100,
     refUnit: unit,
     cal:num("nfCal"), protein:num("nfP"), carb:num("nfC"), fiber:num("nfFb"), fat:num("nfF")
@@ -3035,7 +3098,12 @@ function moveDraft(i,dir){
 
 function saveSession(){
   const exercises = draft
-    .map(r => ({ name:(r.name||"").trim(), sets: r.sets.filter(s => s.weight!=="" || s.reps!=="").map(s=>({weight:s.weight,reps:s.reps})) }))
+    .map(r => {
+      const ex = { name:(r.name||"").trim(),
+                   sets: r.sets.filter(s => s.weight!=="" || s.reps!=="").map(s=>({weight:s.weight,reps:s.reps})) };
+      if(r.bw != null && r.bw !== "") ex.bw = r.bw;   // freeze the bodyweight onto the record
+      return ex;
+    })
     .filter(r => r.name !== "" && r.sets.length);
   if(!exercises.length){ err="Enter at least one set before saving."; render(); return; }
   D.sessions = [...D.sessions.filter(s => !(s.date===trainDate && s.workout===trainWorkout)),
