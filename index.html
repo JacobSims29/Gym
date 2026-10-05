@@ -926,7 +926,7 @@ function historyHTML(){
 function viewPlan(){
   const stale = !D.lastBackup || ago(D.lastBackup) > 14;
   let h = `<div class="eyebrow">The plan</div><h2>Workout templates</h2>
-    <p class="sub">Build as many templates as you like. Sets and reps live here; weight gets logged per session. Steps need no template.</p>
+    <p class="sub">Sets and reps live here; weight gets logged per session.</p>
     <div style="height:16px"></div>`;
   if(stale) h += `<div class="warn">${D.lastBackup ? `Last backup: ${ago(D.lastBackup)} days ago.` : "No backup yet."} Export one from the Backup tab.</div>`;
 
@@ -1061,7 +1061,7 @@ function chartSVG(){
       <text x="${L}" y="${H-4}" fill="#525252" font-size="10">${shortD(asc[0].date)}</text>
       <text x="${W-R}" y="${H-4}" fill="#525252" font-size="10" text-anchor="end">${shortD(asc[asc.length-1].date)}</text>
     </svg>
-    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend. The x axis is calendar time (${Math.round(spanD)} days), so gaps between weigh-ins show as gaps.</p>
+    <p class="sub" style="margin-top:4px">Gray dots are each weigh-in; the amber line is the smoothed trend.</p>
   </div>`;
 }
 function viewWeight(){
@@ -1252,7 +1252,7 @@ function phaseCard(){
   if(!ph){
     let h = `<div class="card">
       <div class="lift"><h3>Phase</h3><span class="last">none running</span></div>
-      <p class="sub" style="margin:6px 0 10px">Start one and the app tracks week count, target rate and total change against it, and the coach stops having to guess what you are doing.</p>
+      <p class="sub" style="margin:6px 0 10px">Tracks week count, target rate and total change against your goal.</p>
       <div class="row" style="flex-wrap:wrap">
         <button class="ghost grow" onclick="startPhase('cut')">Fat loss</button>
         <button class="ghost grow" onclick="pickGainLevel()">Muscle gain</button>
@@ -1350,9 +1350,20 @@ function tdeeOver(days){
   const fit = ols(pts);
   if(!fit) return null;
 
+  /* The intake window is bracketed by the weigh-ins, not by the calendar. A morning
+     weigh-in measures everything eaten up to the end of the previous day, so the weight
+     change between the mornings of day A and day B was produced by eating on days A
+     through B-1. Averaging the calendar window instead paired each weigh-in with food
+     eaten after it — and included today, a day that is still half-eaten and that no
+     weigh-in has measured yet, which is why the estimate drifted as the day went on. */
+  const firstMs = start + pts[0].x*864e5;
+  const lastMs  = start + pts[pts.length-1].x*864e5;
+  const intakeDays = Math.round((lastMs - firstMs)/864e5);   // first .. last-1, inclusive
+  if(intakeDays < 1) return null;
+
   const logged = [];
-  for(let i = 1; i <= days; i++){
-    const ds = iso(new Date(start + i*864e5));
+  for(let t = firstMs; t <= lastMs - 864e5; t += 864e5){
+    const ds = iso(new Date(t));
     if(dayEntries(ds).length) logged.push(ds);
   }
   if(logged.length < TDEE_MIN_DAYS) return null;
@@ -1361,7 +1372,8 @@ function tdeeOver(days){
   const perWeek = fit.slope*7, seWeek = fit.se*7;
   const k = perWeek < 0 ? K_LOSS : K_GAIN;
   return {
-    days, weighIns: pts.length, loggedDays: logged.length, coverage: logged.length/days,
+    days, weighIns: pts.length, loggedDays: logged.length,
+    intakeDays, coverage: logged.length/intakeDays,
     perWeek, seWeek, intake, k,
     tdee: intake - k*perWeek/7,
     se: k*seWeek/7
@@ -1386,25 +1398,25 @@ function tdeeCard(){
   const e = tdeeEstimate();
   if(!e) return `<div class="card">
     <div class="lift"><h3>Maintenance calories</h3><span class="last">not yet</span></div>
-    <p class="sub" style="margin-top:8px">Measured from your own data rather than a formula, once there is enough of it: at least ${TDEE_MIN_WEIGHTS} weigh-ins and ${TDEE_MIN_DAYS} logged days inside the same three weeks.</p>
+    <p class="sub" style="margin-top:8px">Measured from your own intake and weight trend rather than a formula, once there is enough data.</p>
   </div>`;
   const rate = e.perWeek;
   const dir = rate < -0.05 ? "losing" : rate > 0.05 ? "gaining" : "holding";
   const body = `<div class="sub" style="margin-top:8px;line-height:1.6">
-      Over the last ${e.days} days: ${e.weighIns} weigh-ins, ${e.loggedDays} logged days (${Math.round(e.coverage*100)}%).<br>
+      Over the last ${e.days} days: ${e.weighIns} weigh-ins, and ${e.loggedDays} of the ${e.intakeDays} days those weigh-ins measure are logged (${Math.round(e.coverage*100)}%).<br>
       Averaging ${commas(Math.round(e.intake))} cal a day while ${dir} ${Math.abs(rate).toFixed(2)} lb/week.
     </div>`;
   if(e.confident) return `<div class="card">
     <div class="lift"><h3>Maintenance calories</h3><span class="last">±${Math.round(e.se)}</span></div>
     <h2 class="mono" style="margin:6px 0 0">${commas(Math.round(e.tdee/10)*10)} <span class="sub" style="font-size:13px">cal/day</span></h2>
     ${body}
-    <p class="sub" style="margin-top:8px;color:var(--dimmer)">Assumes ${e.k} cal per lb of tissue moved. Your logging bias mostly cancels: if you under-record intake, this reads low by the same amount, so a deficit set against it still comes out about right.</p>
+    <p class="sub" style="margin-top:8px;color:var(--dimmer)">Based on your own intake and weight trend, so consistent logging errors mostly cancel out.</p>
   </div>`;
   return `<div class="card">
     <div class="lift"><h3>Maintenance calories</h3><span class="last">too noisy</span></div>
     <h2 class="mono" style="margin:6px 0 0;color:var(--dim)">~${commas(Math.round(e.tdee/10)*10)} <span class="sub" style="font-size:13px">± ${Math.round(e.se)} cal/day</span></h2>
     ${body}
-    <p class="sub" style="margin-top:8px;color:var(--dimmer)">The error bar is wider than ${TDEE_SE_TARGET} cal, so this is not worth acting on yet. It narrows quickly: the uncertainty on a weight trend falls faster than the window grows, and a slow gain needs six to eight weeks before the signal clears the noise.</p>
+    <p class="sub" style="margin-top:8px;color:var(--dimmer)">Not enough certainty to act on yet — keep logging and it will sharpen, usually within a few more weeks.</p>
   </div>`;
 }
 
@@ -1421,7 +1433,7 @@ function preSnapshotCard(){
   if(!snap) return "";
   return `<div class="card">
     <div class="lift"><h3>Before the last upgrade</h3><span class="last">${esc(snap.at)}</span></div>
-    <p class="sub" style="margin:6px 0 10px;line-height:1.5">A copy of your data is kept automatically whenever the app upgrades its format — this one was taken going from v${snap.from} to v${snap.to}. It exists so a rolled-back app has something to fall back on. Restoring loses anything logged since that date.</p>
+    <p class="sub" style="margin:6px 0 10px;line-height:1.5">An automatic copy taken before the app last updated its data format. Restoring loses anything logged since that date.</p>
     <button class="ghost" onclick="restorePreSnapshot()">Roll back to this copy</button>
   </div>`;
 }
@@ -1459,7 +1471,7 @@ function storageCard(){
       in progress ${kb(st.scratch)} · pre-upgrade copy ${kb(st.snap)}
     </div>
     <p class="sub" style="margin-top:8px;line-height:1.5">${life}</p>
-    <p class="sub" style="margin-top:8px;line-height:1.5;color:var(--dimmer)">Safari allows roughly 5 MB of text per site and may count each character as two bytes, so this compares against the pessimistic 2.5 MB. Exports are unaffected by the limit.</p>
+    <p class="sub" style="margin-top:8px;line-height:1.5;color:var(--dimmer)">Exports are not affected by this limit.</p>
   </div>`;
 }
 
@@ -1851,7 +1863,7 @@ function aiScanCard(){
         : `<button class="primary grow" onclick="runScan()">Estimate nutrition</button>`) : ""}
   </div>`;
   if(scanMode === "recipe")
-    h += `<p class="sub" style="margin-top:8px">Reads the ingredients, converts volumes to weights, and divides by the serving count. You get one serving by weight, so a bigger or smaller portion scales from it. Anything you type about changes you made overrides the recipe.</p>`;
+    h += `<p class="sub" style="margin-top:8px">Reads the ingredients and divides by the serving count, giving you one serving by weight. Anything you type about changes you made overrides the recipe.</p>`;
   if(scanMode === "label")
     h += `<p class="sub" style="margin-top:8px">Transcribes the panel rather than estimating, so this is the most accurate of the three. Get the serving size line in the shot.</p>`;
   if(scanMsg) h += `<p class="sub" style="margin-top:8px;color:${scanMsg.startsWith("Scan failed")?"var(--bad)":"var(--good)"}">${esc(scanMsg)}</p>`;
@@ -2226,7 +2238,7 @@ function libraryCard(){
     : "";
   let h = `<div class="card">
     <div class="lift"><h3>Food library</h3><span class="last">${status}</span></div>
-    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central, loaded from <span class="mono">starter-foods.json</span> into memory each time the app opens. It isn't stored in your saved data, so it costs nothing to keep and nothing to back up. It is fetched fresh each time the app opens, which needs a connection. Editing one saves your version; deleting one hides it. Row-by-row sourcing sits in <span class="mono">starter-foods-provenance.json</span>, which the app never loads.</p>
+    <p class="sub" style="margin:6px 0 10px">Common US foods from USDA FoodData Central. Loaded fresh each time the app opens, so it needs a connection. Editing one saves your version; deleting one hides it.</p>
     ${stamp ? `<div class="sub mono" style="margin-bottom:8px;color:var(--dimmer)">${stamp}</div>` : ""}
     <div class="sub" style="margin-bottom:10px">Your own foods: ${mineCount}${seeds ? ` · ${seeds} saved copies from the old import` : ""}${hid ? ` · ${hid} hidden` : ""}</div>
     <button class="ghost" ${libState==="loading"?"disabled":""} onclick="loadLibrary(true)">${libState==="loading"?"Loading…":"Reload library"}</button>`;
@@ -2238,7 +2250,7 @@ function libraryCard(){
 }
 
 function dietFoods(){
-  let h = `<p class="sub" style="margin-bottom:12px">Your foods and the shipped library, searched together. Nutrition is stored for a reference amount — grams for solids, millilitres for liquids, or ct for whole items like an egg or a bar — and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
+  let h = `<p class="sub" style="margin-bottom:12px">Nutrition is stored per gram, millilitre, or whole item, and any portion you log scales from it. Editing a food only affects meals you log afterward.</p>`;
 
   h += aiScanCard();
   h += mealTemplateCard();
@@ -2970,7 +2982,7 @@ function viewSummary(){
       });
       h += `</div>`;
     });
-    h += `<p class="sub" style="text-align:center;margin-top:6px">The last ${COACH_SEND} are sent back to the coach in full; older ones by date only. Last ${COACH_KEEP} kept.</p>`;
+    h += `<p class="sub" style="text-align:center;margin-top:6px">Your recent analyses, kept so the coach can refer back to them.</p>`;
   }
   return h;
 }
